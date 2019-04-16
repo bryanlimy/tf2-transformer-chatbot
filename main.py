@@ -1,8 +1,8 @@
 import os
-import tensorflow as tf
 import re
-import numpy as np
 import time
+import numpy as np
+import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
 START_TAG, END_TAG = '<start>', '<end>'
@@ -35,19 +35,19 @@ def preprocess_sentence(sentence):
   return START_TAG + ' ' + sentence + ' ' + END_TAG
 
 
-def create_dataset(num_samples=None):
+def load_conversations(num_samples=None):
   # dictionary of line id to text
   id2line = {}
   with open(path_to_movie_lines, errors='ignore') as file:
-    for line in file.read().splitlines():
-      parts = line.split(' +++$+++ ')
+    for line in file:
+      parts = line.replace('\n', '').split(' +++$+++ ')
       id2line[parts[0]] = parts[4]
 
   inputs, targets = [], []
   count = 0
   with open(path_to_movie_conversations, 'r') as file:
-    for line in file.read().splitlines():
-      parts = line.split(' +++$+++ ')
+    for line in file:
+      parts = line.replace('\n', '').split(' +++$+++ ')
       # get conversation in a list of line ID
       conversation = [line[1:-1] for line in parts[3][1:-1].split(', ')]
       for i in range(len(conversation) - 1):
@@ -69,13 +69,13 @@ def tokenize(sentences):
 
 def load_dataset(num_samples=None):
   # creating cleaned input, output pairs
-  inputs, targets = create_dataset(num_samples)
+  inputs, targets = load_conversations(num_samples)
   input_tensor, input_tokenizer = tokenize(inputs)
   target_tensor, target_tokenizer = tokenize(targets)
   return input_tensor, target_tensor, input_tokenizer, target_tokenizer
 
 
-NUM_SAMPLES = 100000
+NUM_SAMPLES = 50000
 
 # load and tokenize dataset
 input_tensor, target_tensor, input_tokenizer, target_tokenizer = load_dataset(
@@ -89,24 +89,10 @@ input_train, input_eval, target_train, target_eval = train_test_split(
     input_tensor, target_tensor, test_size=0.2, shuffle=True)
 
 print('Train set size: {}'.format(len(input_train)))
-print('evaluation set size: {}'.format(len(input_eval)))
-
-
-def convert(tokenizer, tensor):
-  for t in tensor:
-    if t != 0:
-      print("{} ----> {}".format(t, tokenizer.index_word[t]))
-
-
-print("Input; index to word mapping")
-convert(input_tokenizer, input_train[0])
-print()
-print("Target; index to word mapping")
-convert(target_tokenizer, target_train[0])
+print('Evaluation set size: {}'.format(len(input_eval)))
 
 BUFFER_SIZE = 1024
-BATCH_SIZE = 16
-steps_per_epoch = len(input_train) // BATCH_SIZE
+BATCH_SIZE = 32
 embedding_dim = 256
 units = 1024
 input_vocab_size = len(input_tokenizer.word_index) + 1
@@ -549,38 +535,41 @@ if ckpt_manager.latest_checkpoint:
 
 
 @tf.function
-def train_step(inp, tar):
-  tar_inp = tar[:, :-1]
-  tar_real = tar[:, 1:]
+def train_step(inputs, targets):
+  # decoder input begins with START_TAG
+  decoder_inputs = targets[:, :-1]
+  # target outputs begins after START_TAG
+  targets = targets[:, 1:]
 
-  enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
+  enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
+      inputs, decoder_inputs)
 
   with tf.GradientTape() as tape:
-    predictions, _ = transformer(inp, tar_inp, True, enc_padding_mask,
+    predictions, _ = transformer(inputs, decoder_inputs, True, enc_padding_mask,
                                  combined_mask, dec_padding_mask)
-    loss = loss_function(tar_real, predictions)
+    loss = loss_function(targets, predictions)
 
   gradients = tape.gradient(loss, transformer.trainable_variables)
   optimizer.apply_gradients(zip(gradients, transformer.trainable_variables))
 
   train_loss(loss)
-  train_accuracy(tar_real, predictions)
+  train_accuracy(targets, predictions)
 
 
 @tf.function
-def eval_step(inp, tar):
-  tar_inp = tar[:, :-1]
-  tar_real = tar[:, 1:]
+def eval_step(inputs, targets):
+  decoder_inputs = targets[:, :-1]
+  targets = targets[:, 1:]
 
-  enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
+  enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
+      inputs, decoder_inputs)
 
-  with tf.GradientTape() as tape:
-    predictions, _ = transformer(inp, tar_inp, True, enc_padding_mask,
-                                 combined_mask, dec_padding_mask)
-    loss = loss_function(tar_real, predictions)
+  predictions, _ = transformer(inputs, decoder_inputs, True, enc_padding_mask,
+                               combined_mask, dec_padding_mask)
+  loss = loss_function(targets, predictions)
 
   eval_loss(loss)
-  eval_accuracy(tar_real, predictions)
+  eval_accuracy(targets, predictions)
 
 
 for epoch in range(EPOCHS):
@@ -593,8 +582,8 @@ for epoch in range(EPOCHS):
   start = time.time()
 
   # train
-  for (batch, (inp, tar)) in enumerate(train_ds):
-    train_step(inp, tar)
+  for (batch, (inputs, targets)) in enumerate(train_ds):
+    train_step(inputs, targets)
 
     if batch % 200 == 0:
       print('Epoch {} Batch {} Loss {:.4f} Accuracy {:.4f}'.format(
@@ -603,8 +592,8 @@ for epoch in range(EPOCHS):
   end = time.time()
 
   # evaluate
-  for (batch, (inp, tar)) in enumerate(eval_ds):
-    eval_step(inp, tar)
+  for (batch, (inputs, targets)) in enumerate(eval_ds):
+    eval_step(inputs, targets)
 
   print('Epoch {} Loss {:.4f} Accuracy {:.2f} Eval Loss {:.4f} '
         'Eval Accuracy {:.2f} Time {:.2f}s'.format(
@@ -664,7 +653,7 @@ def evaluate(sentence):
     if tf.equal(predicted_id, target_tokenizer.word_index[END_TAG]):
       return tf.squeeze(output, axis=0), attention_weights
 
-    # concatentate the predicted_id to the output which is given to the decoder
+    # concatenate the predicted_id to the output which is given to the decoder
     # as its input.
     output = tf.concat([output, predicted_id], axis=-1)
 
@@ -674,6 +663,7 @@ def evaluate(sentence):
 def translate(sentence):
   result, attention_weights = evaluate(sentence)
 
+  # convert from tokens to words
   predicted_sentence = [
       target_tokenizer.index_word[int(t)]
       for t in result
