@@ -587,7 +587,7 @@ def train_and_evaluate(epochs):
       loss, predictions = train_step(inputs, targets)
 
       train_loss(loss)
-      train_accuracy(targets, predictions)
+      train_accuracy(targets[:, 1:], predictions)
 
       if batch % 200 == 0:
         print('Target: {}'.format(targets[0]))
@@ -603,7 +603,7 @@ def train_and_evaluate(epochs):
       loss, predictions = eval_step(inputs, targets)
 
       eval_loss(loss)
-      eval_accuracy(targets, predictions)
+      eval_accuracy(targets[:, 1:], predictions)
 
     print('Epoch {} Loss {:.4f} Accuracy {:.2f} Eval Loss {:.4f} '
           'Eval Accuracy {:.2f} Time {:.2f}s\n'.format(
@@ -620,6 +620,9 @@ def train_and_evaluate(epochs):
       ckpt_save_path = ckpt_manager.save()
       print('Saving checkpoint for epoch {} at {}'.format(
           epoch + 1, ckpt_save_path))
+
+
+train_and_evaluate(epochs=EPOCHS)
 
 
 def evaluate(sentence):
