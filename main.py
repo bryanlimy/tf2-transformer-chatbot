@@ -81,9 +81,6 @@ NUM_SAMPLES = 50000
 input_tensor, target_tensor, input_tokenizer, target_tokenizer = load_dataset(
     num_samples=NUM_SAMPLES)
 
-# get max_length of the inputs and target tensors
-max_input_len, max_target_len = input_tensor.shape[-1], target_tensor.shape[-1]
-
 # split into train and evaluation sets using 80-20 split
 input_train, input_eval, target_train, target_eval = train_test_split(
     input_tensor, target_tensor, test_size=0.2, shuffle=True)
@@ -95,6 +92,8 @@ BUFFER_SIZE = 1024
 BATCH_SIZE = 32
 embedding_dim = 256
 units = 1024
+max_input_len = input_tensor.shape[-1]
+max_target_len = target_tensor.shape[-1]
 input_vocab_size = len(input_tokenizer.word_index) + 1
 target_vocab_size = len(target_tokenizer.word_index) + 1
 
@@ -149,6 +148,24 @@ def create_padding_mask(seq):
 def create_look_ahead_mask(size):
   mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
   return mask  # (seq_len, seq_len)
+
+
+def create_masks(inp, tar):
+  # Encoder padding mask
+  enc_padding_mask = create_padding_mask(inp)
+
+  # Used in the 2nd attention block in the decoder.
+  # This padding mask is used to mask the encoder outputs.
+  dec_padding_mask = create_padding_mask(inp)
+
+  # Used in the 1st attention block in the decoder.
+  # It is used to pad and mask future tokens in the input received by
+  # the decoder.
+  look_ahead_mask = create_look_ahead_mask(tf.shape(tar)[1])
+  dec_target_padding_mask = create_padding_mask(tar)
+  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+
+  return enc_padding_mask, combined_mask, dec_padding_mask
 
 
 def scaled_dot_product_attention(q, k, v, mask):
@@ -449,7 +466,7 @@ class Transformer(tf.keras.Model):
     return final_output, attention_weights
 
 
-EPOCHS = 10
+EPOCHS = 2
 MAX_LENGTH = 40
 num_layers = 4
 d_model = 128
@@ -502,25 +519,6 @@ eval_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
 
 transformer = Transformer(num_layers, d_model, num_heads, dff, input_vocab_size,
                           target_vocab_size, dropout_rate)
-
-
-def create_masks(inp, tar):
-  # Encoder padding mask
-  enc_padding_mask = create_padding_mask(inp)
-
-  # Used in the 2nd attention block in the decoder.
-  # This padding mask is used to mask the encoder outputs.
-  dec_padding_mask = create_padding_mask(inp)
-
-  # Used in the 1st attention block in the decoder.
-  # It is used to pad and mask future tokens in the input received by
-  # the decoder.
-  look_ahead_mask = create_look_ahead_mask(tf.shape(tar)[1])
-  dec_target_padding_mask = create_padding_mask(tar)
-  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
-
-  return enc_padding_mask, combined_mask, dec_padding_mask
-
 
 checkpoint_path = "./checkpoints/train"
 
@@ -586,8 +584,9 @@ for epoch in range(EPOCHS):
     train_step(inputs, targets)
 
     if batch % 200 == 0:
-      print('Epoch {} Batch {} Loss {:.4f} Accuracy {:.4f}'.format(
-          epoch + 1, batch, train_loss.result(), train_accuracy.result()))
+      print('Epoch {} Batch {} Loss {:.4f} Accuracy {:.2f}'.format(
+          epoch + 1, batch, train_loss.result(),
+          train_accuracy.result() * 100))
 
   end = time.time()
 
