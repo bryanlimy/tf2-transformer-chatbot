@@ -526,6 +526,14 @@ if ckpt_manager.latest_checkpoint:
   ckpt.restore(ckpt_manager.latest_checkpoint)
   print('Latest checkpoint restored!!')
 
+# Metrics
+train_loss = tf.keras.metrics.Mean(name='train_loss')
+train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
+    name='train_accuracy')
+
+eval_loss = tf.keras.metrics.Mean(name='eval_loss')
+eval_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
+
 
 @tf.function
 def train_step(inputs, targets):
@@ -545,7 +553,8 @@ def train_step(inputs, targets):
   gradients = tape.gradient(loss, transformer.trainable_variables)
   optimizer.apply_gradients(zip(gradients, transformer.trainable_variables))
 
-  return loss, predictions
+  train_loss(loss)
+  train_accuracy(targets, predictions)
 
 
 @tf.function
@@ -560,17 +569,11 @@ def eval_step(inputs, targets):
                                combined_mask, dec_padding_mask)
   loss = loss_function(targets, predictions)
 
-  return loss, predictions
+  eval_loss(loss)
+  eval_accuracy(targets, predictions)
 
 
 def train_and_evaluate(epochs):
-  train_loss = tf.keras.metrics.Mean(name='train_loss')
-  train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
-      name='train_accuracy')
-
-  eval_loss = tf.keras.metrics.Mean(name='eval_loss')
-  eval_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
-      name='eval_accuracy')
 
   for epoch in range(epochs):
 
@@ -584,14 +587,9 @@ def train_and_evaluate(epochs):
 
     # train
     for (batch, (inputs, targets)) in enumerate(train_ds):
-      loss, predictions = train_step(inputs, targets)
-
-      train_loss(loss)
-      train_accuracy(targets[:, 1:], predictions)
+      train_step(inputs, targets)
 
       if batch % 200 == 0:
-        print('Target: {}'.format(targets[0]))
-        print('Predictions: {}'.format(predictions[0]))
         print('Epoch {} Batch {} Loss {:.4f} Accuracy {:.2f}'.format(
             epoch + 1, batch, train_loss.result(),
             train_accuracy.result() * 100))
@@ -600,10 +598,7 @@ def train_and_evaluate(epochs):
 
     # evaluate
     for (batch, (inputs, targets)) in enumerate(eval_ds):
-      loss, predictions = eval_step(inputs, targets)
-
-      eval_loss(loss)
-      eval_accuracy(targets[:, 1:], predictions)
+      eval_step(inputs, targets)
 
     print('Epoch {} Loss {:.4f} Accuracy {:.2f} Eval Loss {:.4f} '
           'Eval Accuracy {:.2f} Time {:.2f}s\n'.format(
