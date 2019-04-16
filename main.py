@@ -674,7 +674,11 @@ def evaluate(sentence):
 def translate(sentence):
   result, attention_weights = evaluate(sentence)
 
-  predicted_sentence = [target_tokenizer.index_word[int(t)] for t in result]
+  predicted_sentence = [
+      target_tokenizer.index_word[int(t)]
+      for t in result
+      if int(t) in target_tokenizer.index_word
+  ]
 
   print('Input: {}'.format(sentence))
   print('Predicted: {}'.format(' '.join(predicted_sentence)))
