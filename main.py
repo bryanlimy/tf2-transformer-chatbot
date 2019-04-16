@@ -30,7 +30,7 @@ def preprocess_sentence(sentence):
   sentence = re.sub(r'[" "]+', " ", sentence)
   # replacing everything with space except (a-z, A-Z, ".", "?", "!", ",")
   sentence = re.sub(r"[^a-zA-Z?.!,¿]+", " ", sentence)
-  sentence = sentence.rstrip().strip()
+  sentence = sentence.strip()
   # adding a start and an end token to the sentence
   return START_TAG + ' ' + sentence + ' ' + END_TAG
 
@@ -70,12 +70,14 @@ def tokenize(sentences):
 def load_dataset(num_samples=None):
   # creating cleaned input, output pairs
   inputs, targets = load_conversations(num_samples)
+  print('Sample input: {}'.format(inputs[10]))
+  print('Sample output: {}'.format(targets[10]))
   input_tensor, input_tokenizer = tokenize(inputs)
   target_tensor, target_tokenizer = tokenize(targets)
   return input_tensor, target_tensor, input_tokenizer, target_tokenizer
 
 
-NUM_SAMPLES = 50000
+NUM_SAMPLES = 100000
 
 # load and tokenize dataset
 input_tensor, target_tensor, input_tokenizer, target_tokenizer = load_dataset(
@@ -466,7 +468,7 @@ class Transformer(tf.keras.Model):
     return final_output, attention_weights
 
 
-EPOCHS = 2
+EPOCHS = 5
 MAX_LENGTH = 40
 num_layers = 4
 d_model = 128
@@ -510,13 +512,6 @@ def loss_function(real, pred):
   return tf.reduce_mean(loss_)
 
 
-train_loss = tf.keras.metrics.Mean(name='train_loss')
-train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
-    name='train_accuracy')
-
-eval_loss = tf.keras.metrics.Mean(name='eval_loss')
-eval_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
-
 transformer = Transformer(num_layers, d_model, num_heads, dff, input_vocab_size,
                           target_vocab_size, dropout_rate)
 
@@ -550,8 +545,7 @@ def train_step(inputs, targets):
   gradients = tape.gradient(loss, transformer.trainable_variables)
   optimizer.apply_gradients(zip(gradients, transformer.trainable_variables))
 
-  train_loss(loss)
-  train_accuracy(targets, predictions)
+  return loss, predictions
 
 
 @tf.function
@@ -566,53 +560,72 @@ def eval_step(inputs, targets):
                                combined_mask, dec_padding_mask)
   loss = loss_function(targets, predictions)
 
-  eval_loss(loss)
-  eval_accuracy(targets, predictions)
+  return loss, predictions
 
 
-for epoch in range(EPOCHS):
-  # reset metrics
-  train_loss.reset_states()
-  train_accuracy.reset_states()
-  eval_loss.reset_states()
-  eval_accuracy.reset_states()
+def train_and_evaluate(epochs):
+  train_loss = tf.keras.metrics.Mean(name='train_loss')
+  train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
+      name='train_accuracy')
 
-  start = time.time()
+  eval_loss = tf.keras.metrics.Mean(name='eval_loss')
+  eval_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
+      name='eval_accuracy')
 
-  # train
-  for (batch, (inputs, targets)) in enumerate(train_ds):
-    train_step(inputs, targets)
+  for epoch in range(epochs):
 
-    if batch % 200 == 0:
-      print('Epoch {} Batch {} Loss {:.4f} Accuracy {:.2f}'.format(
-          epoch + 1, batch, train_loss.result(),
-          train_accuracy.result() * 100))
+    # reset metrics
+    train_loss.reset_states()
+    train_accuracy.reset_states()
+    eval_loss.reset_states()
+    eval_accuracy.reset_states()
 
-  end = time.time()
+    start = time.time()
 
-  # evaluate
-  for (batch, (inputs, targets)) in enumerate(eval_ds):
-    eval_step(inputs, targets)
+    # train
+    for (batch, (inputs, targets)) in enumerate(train_ds):
+      loss, predictions = train_step(inputs, targets)
 
-  print('Epoch {} Loss {:.4f} Accuracy {:.2f} Eval Loss {:.4f} '
-        'Eval Accuracy {:.2f} Time {:.2f}s'.format(
-            epoch + 1,
-            train_loss.result(),
-            train_accuracy.result() * 100,
-            eval_loss.result(),
-            eval_accuracy.result() * 100,
-            end - start,
-        ))
+      train_loss(loss)
+      train_accuracy(targets, predictions)
 
-  # save checkpoint every 2 epochs
-  if epoch % 2 == 0:
-    ckpt_save_path = ckpt_manager.save()
-    print('Saving checkpoint for epoch {} at {}'.format(epoch + 1,
-                                                        ckpt_save_path))
+      if batch % 200 == 0:
+        print('Target: {}'.format(targets[0]))
+        print('Predictions: {}'.format(predictions[0]))
+        print('Epoch {} Batch {} Loss {:.4f} Accuracy {:.2f}'.format(
+            epoch + 1, batch, train_loss.result(),
+            train_accuracy.result() * 100))
+
+    end = time.time()
+
+    # evaluate
+    for (batch, (inputs, targets)) in enumerate(eval_ds):
+      loss, predictions = eval_step(inputs, targets)
+
+      eval_loss(loss)
+      eval_accuracy(targets, predictions)
+
+    print('Epoch {} Loss {:.4f} Accuracy {:.2f} Eval Loss {:.4f} '
+          'Eval Accuracy {:.2f} Time {:.2f}s\n'.format(
+              epoch + 1,
+              train_loss.result(),
+              train_accuracy.result() * 100,
+              eval_loss.result(),
+              eval_accuracy.result() * 100,
+              end - start,
+          ))
+
+    # save checkpoint every 2 epochs
+    if epoch % 2 == 0:
+      ckpt_save_path = ckpt_manager.save()
+      print('Saving checkpoint for epoch {} at {}'.format(
+          epoch + 1, ckpt_save_path))
 
 
 def evaluate(sentence):
   sentence = preprocess_sentence(sentence)
+
+  print('Preprocessed sentence: {}'.format(sentence))
 
   # tokenize sentence
   sentence = [
@@ -620,6 +633,8 @@ def evaluate(sentence):
       for t in sentence.split(' ')
       if t in input_tokenizer.word_index
   ]
+
+  print('Tokenized sentence: {}'.format(sentence))
 
   # pad tokens to fixed length
   encoder_input = tf.keras.preprocessing.sequence.pad_sequences(
@@ -662,6 +677,7 @@ def evaluate(sentence):
 def translate(sentence):
   result, attention_weights = evaluate(sentence)
 
+  print('Tokenized output: {}'.format(result))
   # convert from tokens to words
   predicted_sentence = [
       target_tokenizer.index_word[int(t)]
@@ -670,7 +686,7 @@ def translate(sentence):
   ]
 
   print('Input: {}'.format(sentence))
-  print('Predicted: {}'.format(' '.join(predicted_sentence)))
+  print('Output: {}'.format(' '.join(predicted_sentence)))
 
 
-translate('Why are you crying? ')
+translate('This is my head')
