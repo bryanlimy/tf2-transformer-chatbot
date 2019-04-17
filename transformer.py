@@ -3,6 +3,7 @@ import tensorflow as tf
 import os
 import time
 import numpy as np
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -11,11 +12,16 @@ examples, metadata = tfds.load(
     'ted_hrlr_translate/pt_to_en', with_info=True, as_supervised=True)
 train_examples, val_examples = examples['train'], examples['validation']
 
+en_generator, pt_generator = [], []
+for pt, en in train_examples:
+  en_generator.append(en.numpy())
+  pt_generator.append(pt.numpy())
+
 tokenizer_en = tfds.features.text.SubwordTextEncoder.build_from_corpus(
-    (en.numpy() for pt, en in train_examples), target_vocab_size=2**13)
+    en_generator, target_vocab_size=2**13)
 
 tokenizer_pt = tfds.features.text.SubwordTextEncoder.build_from_corpus(
-    (pt.numpy() for pt, en in train_examples), target_vocab_size=2**13)
+    pt_generator, target_vocab_size=2**13)
 
 BUFFER_SIZE = 1024
 BATCH_SIZE = 64
@@ -117,10 +123,11 @@ def scaled_dot_product_attention(q, k, v, mask):
 
   # softmax is normalized on the last axis (seq_len_k) so that the scores
   # add up to 1.
-  attention_weights = tf.nn.softmax(
-      scaled_attention_logits, axis=-1)  # (..., seq_len_q, seq_len_k)
+  # (..., seq_len_q, seq_len_k)
+  attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
 
-  output = tf.matmul(attention_weights, v)  # (..., seq_len_v, depth)
+  # (..., seq_len_v, depth)
+  output = tf.matmul(attention_weights, v)
 
   return output, attention_weights
 
@@ -156,12 +163,12 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     k = self.wk(k)  # (batch_size, seq_len, d_model)
     v = self.wv(v)  # (batch_size, seq_len, d_model)
 
-    q = self.split_heads(
-        q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
-    k = self.split_heads(
-        k, batch_size)  # (batch_size, num_heads, seq_len_k, depth)
-    v = self.split_heads(
-        v, batch_size)  # (batch_size, num_heads, seq_len_v, depth)
+    # (batch_size, num_heads, seq_len_q, depth)
+    q = self.split_heads(q, batch_size)
+    # (batch_size, num_heads, seq_len_k, depth)
+    k = self.split_heads(k, batch_size)
+    # (batch_size, num_heads, seq_len_v, depth)
+    v = self.split_heads(v, batch_size)
 
     # scaled_attention.shape == (batch_size, num_heads, seq_len_v, depth)
     # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
@@ -172,20 +179,22 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         scaled_attention, perm=[0, 2, 1,
                                 3])  # (batch_size, seq_len_v, num_heads, depth)
 
-    concat_attention = tf.reshape(
-        scaled_attention,
-        (batch_size, -1, self.d_model))  # (batch_size, seq_len_v, d_model)
+    # (batch_size, seq_len_v, d_model)
+    concat_attention = tf.reshape(scaled_attention,
+                                  (batch_size, -1, self.d_model))
 
-    output = self.dense(concat_attention)  # (batch_size, seq_len_v, d_model)
+    # (batch_size, seq_len_v, d_model)
+    output = self.dense(concat_attention)
 
     return output, attention_weights
 
 
 def point_wise_feed_forward_network(d_model, dff):
   return tf.keras.Sequential([
-      tf.keras.layers.Dense(dff,
-                            activation='relu'),  # (batch_size, seq_len, dff)
-      tf.keras.layers.Dense(d_model)  # (batch_size, seq_len, d_model)
+      # (batch_size, seq_len, dff)
+      tf.keras.layers.Dense(dff, activation='relu'),
+      # (batch_size, seq_len, d_model)
+      tf.keras.layers.Dense(d_model)
   ])
 
 
@@ -197,24 +206,26 @@ class EncoderLayer(tf.keras.layers.Layer):
     self.mha = MultiHeadAttention(d_model, num_heads)
     self.ffn = point_wise_feed_forward_network(d_model, dff)
 
-    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm1 = tf.keras.layers.experimental.LayerNormalization(
+        epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.experimental.LayerNormalization(
+        epsilon=1e-6)
 
     self.dropout1 = tf.keras.layers.Dropout(rate)
     self.dropout2 = tf.keras.layers.Dropout(rate)
 
   def call(self, x, training, mask):
-
-    attn_output, _ = self.mha(x, x, x,
-                              mask)  # (batch_size, input_seq_len, d_model)
+    # (batch_size, input_seq_len, d_model)
+    attn_output, _ = self.mha(x, x, x, mask)
     attn_output = self.dropout1(attn_output, training=training)
-    out1 = self.layernorm1(
-        x + attn_output)  # (batch_size, input_seq_len, d_model)
+    # (batch_size, input_seq_len, d_model)
+    out1 = self.layernorm1(x + attn_output)
 
-    ffn_output = self.ffn(out1)  # (batch_size, input_seq_len, d_model)
+    # (batch_size, input_seq_len, d_model)
+    ffn_output = self.ffn(out1)
     ffn_output = self.dropout2(ffn_output, training=training)
-    out2 = self.layernorm2(
-        out1 + ffn_output)  # (batch_size, input_seq_len, d_model)
+    # (batch_size, input_seq_len, d_model)
+    out2 = self.layernorm2(out1 + ffn_output)
 
     return out2
 
@@ -229,9 +240,12 @@ class DecoderLayer(tf.keras.layers.Layer):
 
     self.ffn = point_wise_feed_forward_network(d_model, dff)
 
-    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-    self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm1 = tf.keras.layers.experimental.LayerNormalization(
+        epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.experimental.LayerNormalization(
+        epsilon=1e-6)
+    self.layernorm3 = tf.keras.layers.experimental.LayerNormalization(
+        epsilon=1e-6)
 
     self.dropout1 = tf.keras.layers.Dropout(rate)
     self.dropout2 = tf.keras.layers.Dropout(rate)
@@ -288,7 +302,8 @@ class Encoder(tf.keras.layers.Layer):
     seq_len = tf.shape(x)[1]
 
     # adding embedding and position encoding.
-    x = self.embedding(x)  # (batch_size, input_seq_len, d_model)
+    # (batch_size, input_seq_len, d_model)
+    x = self.embedding(x)
     x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
     x += self.pos_encoding[:, :seq_len, :]
 
@@ -327,7 +342,8 @@ class Decoder(tf.keras.layers.Layer):
     seq_len = tf.shape(x)[1]
     attention_weights = {}
 
-    x = self.embedding(x)  # (batch_size, target_seq_len, d_model)
+    # (batch_size, target_seq_len, d_model)
+    x = self.embedding(x)
     x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
     x += self.pos_encoding[:, :seq_len, :]
 
@@ -366,16 +382,15 @@ class Transformer(tf.keras.Model):
 
   def call(self, inp, tar, training, enc_padding_mask, look_ahead_mask,
            dec_padding_mask):
-
-    enc_output = self.encoder(
-        inp, training, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
+    # (batch_size, inp_seq_len, d_model)
+    enc_output = self.encoder(inp, training, enc_padding_mask)
 
     # dec_output.shape == (batch_size, tar_seq_len, d_model)
     dec_output, attention_weights = self.decoder(
         tar, enc_output, training, look_ahead_mask, dec_padding_mask)
 
-    final_output = self.final_layer(
-        dec_output)  # (batch_size, tar_seq_len, target_vocab_size)
+    # (batch_size, tar_seq_len, target_vocab_size)
+    final_output = self.final_layer(dec_output)
 
     return final_output, attention_weights
 
@@ -493,12 +508,10 @@ def train(epochs):
     start = time.time()
 
     # inp -> portuguese, tar -> english
-    for (batch, (inp, tar)) in enumerate(train_dataset):
-      train_step(inp, tar)
-
-      if batch % 500 == 0:
-        print('Epoch {} Batch {} Loss {:.4f} Accuracy {:.4f}'.format(
-            epoch + 1, batch, train_loss.result(), train_accuracy.result()))
+    with tqdm(total=702) as pbar:
+      for (batch, (inp, tar)) in enumerate(train_dataset):
+        train_step(inp, tar)
+        pbar.update(1)
 
     end = time.time()
 
@@ -580,10 +593,13 @@ def plot_attention_weights(attention, sentence, result, layer):
         fontdict=fontdict,
         rotation=90)
 
-    ax.set_yticklabels([
-        tokenizer_en.decode([i]) for i in result if i < tokenizer_en.vocab_size
-    ],
-                       fontdict=fontdict)
+    ax.set_yticklabels(
+        [
+            tokenizer_en.decode([i])
+            for i in result
+            if i < tokenizer_en.vocab_size
+        ],
+        fontdict=fontdict)
 
     ax.set_xlabel('Head {}'.format(head + 1))
 
@@ -602,20 +618,3 @@ def translate(sentence, plot=''):
 
   # if plot:
   #   plot_attention_weights(attention_weights, sentence, result, plot)
-
-
-translate("este é um problema que temos que resolver.")
-print("Real translation: this is a problem we have to solve .")
-
-translate("os meus vizinhos ouviram sobre esta ideia.")
-print("Real translation: and my neighboring homes heard about this idea .")
-
-translate(
-    "vou então muito rapidamente partilhar convosco algumas histórias de algumas coisas mágicas que aconteceram."
-)
-print(
-    "Real translation: so i 'll just share with you some stories very quickly of some magical things that have happened ."
-)
-
-translate("este é o primeiro livro que eu fiz.", plot='decoder_layer4_block2')
-print("Real translation: this is the first book i've ever done.")
