@@ -1,11 +1,19 @@
 import os
 import re
 import time
+import pickle
 import numpy as np
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+tf.random.set_seed(1234)
+np.random.seed(1234)
+
 START_TAG, END_TAG = '<start>', '<end>'
+NUM_SAMPLES = 10000
+MAX_LENGTH = 40
 
 # Download and extract dataset
 path_to_zip = tf.keras.utils.get_file(
@@ -35,7 +43,7 @@ def preprocess_sentence(sentence):
   return START_TAG + ' ' + sentence + ' ' + END_TAG
 
 
-def load_conversations(num_samples=None):
+def load_conversations():
   # dictionary of line id to text
   id2line = {}
   with open(path_to_movie_lines, errors='ignore') as file:
@@ -51,11 +59,14 @@ def load_conversations(num_samples=None):
       # get conversation in a list of line ID
       conversation = [line[1:-1] for line in parts[3][1:-1].split(', ')]
       for i in range(len(conversation) - 1):
-        inputs.append(preprocess_sentence(id2line[conversation[i]]))
-        targets.append(preprocess_sentence(id2line[conversation[i + 1]]))
-        count += 1
-        if num_samples is not None and count >= num_samples:
-          return inputs, targets
+        input = preprocess_sentence(id2line[conversation[i]])
+        target = preprocess_sentence(id2line[conversation[i + 1]])
+        if max([len(input), len(target)]) <= MAX_LENGTH:
+          inputs.append(input)
+          targets.append(target)
+          count += 1
+          if count >= NUM_SAMPLES:
+            return inputs, targets
   return inputs, targets
 
 
@@ -63,29 +74,43 @@ def tokenize(sentences):
   tokenizer = tf.keras.preprocessing.text.Tokenizer(filters='')
   tokenizer.fit_on_texts(sentences)
   tensor = tokenizer.texts_to_sequences(sentences)
-  tensor = tf.keras.preprocessing.sequence.pad_sequences(tensor, padding='post')
+  tensor = tf.keras.preprocessing.sequence.pad_sequences(
+      tensor, maxlen=MAX_LENGTH, padding='post')
   return tensor, tokenizer
 
 
-def load_dataset(num_samples=None):
+def load_dataset():
   # creating cleaned input, output pairs
-  inputs, targets = load_conversations(num_samples)
-  print('Sample input: {}'.format(inputs[10]))
-  print('Sample output: {}'.format(targets[10]))
-  input_tensor, input_tokenizer = tokenize(inputs)
-  target_tensor, target_tokenizer = tokenize(targets)
+  dataset_pkl = 'dataset.pkl'
+  if os.path.isfile(dataset_pkl):
+    with open(dataset_pkl, 'rb') as file:
+      dataset = pickle.load(file)
+    input_tensor = dataset['input_tensor']
+    input_tokenizer = dataset['input_tokenizer']
+    target_tensor = dataset['target_tensor']
+    target_tokenizer = dataset['target_tokenizer']
+  else:
+    inputs, targets = load_conversations()
+    print('Sample input: {}'.format(inputs[10]))
+    print('Sample output: {}'.format(targets[10]))
+    input_tensor, input_tokenizer = tokenize(inputs)
+    target_tensor, target_tokenizer = tokenize(targets)
+    with open(dataset_pkl, 'wb') as file:
+      pickle.dump({
+          'input_tensor': input_tensor,
+          'input_tokenizer': input_tokenizer,
+          'target_tensor': target_tensor,
+          'target_tokenizer': target_tokenizer
+      }, file)
   return input_tensor, target_tensor, input_tokenizer, target_tokenizer
 
 
-NUM_SAMPLES = 100000
-
 # load and tokenize dataset
-input_tensor, target_tensor, input_tokenizer, target_tokenizer = load_dataset(
-    num_samples=NUM_SAMPLES)
+input_tensor, target_tensor, input_tokenizer, target_tokenizer = load_dataset()
 
 # split into train and evaluation sets using 80-20 split
 input_train, input_eval, target_train, target_eval = train_test_split(
-    input_tensor, target_tensor, test_size=0.2, shuffle=True)
+    input_tensor, target_tensor, test_size=0.2, random_state=1234, shuffle=True)
 
 print('Train set size: {}'.format(len(input_train)))
 print('Evaluation set size: {}'.format(len(input_eval)))
@@ -93,9 +118,7 @@ print('Evaluation set size: {}'.format(len(input_eval)))
 BUFFER_SIZE = 1024
 BATCH_SIZE = 32
 embedding_dim = 256
-units = 1024
-max_input_len = input_tensor.shape[-1]
-max_target_len = target_tensor.shape[-1]
+units = 512
 input_vocab_size = len(input_tokenizer.word_index) + 1
 target_vocab_size = len(target_tokenizer.word_index) + 1
 
@@ -106,14 +129,12 @@ print("Target vocab size: {}".format(target_vocab_size))
 train_ds = tf.data.Dataset.from_tensor_slices((input_train, target_train))
 train_ds = train_ds.shuffle(buffer_size=BUFFER_SIZE)
 train_ds = train_ds.batch(batch_size=BATCH_SIZE, drop_remainder=True)
+train_ds = train_ds.cache()
 
 # eval dataset
 eval_ds = tf.data.Dataset.from_tensor_slices((input_eval, target_eval))
 eval_ds = eval_ds.shuffle(buffer_size=BUFFER_SIZE)
 eval_ds = eval_ds.batch(batch_size=BATCH_SIZE, drop_remainder=True)
-
-print("Train set: {}".format(train_ds))
-print("Evaluation set: {}".format(eval_ds))
 
 
 def get_angles(pos, i, d_model):
@@ -234,40 +255,43 @@ class MultiHeadAttention(tf.keras.layers.Layer):
   def call(self, v, k, q, mask):
     batch_size = tf.shape(q)[0]
 
-    q = self.wq(q)  # (batch_size, seq_len, d_model)
-    k = self.wk(k)  # (batch_size, seq_len, d_model)
-    v = self.wv(v)  # (batch_size, seq_len, d_model)
+    # (batch_size, seq_len, d_model)
+    q = self.wq(q)
+    # (batch_size, seq_len, d_model)
+    k = self.wk(k)
+    # (batch_size, seq_len, d_model)
+    v = self.wv(v)
 
-    q = self.split_heads(
-        q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
-    k = self.split_heads(
-        k, batch_size)  # (batch_size, num_heads, seq_len_k, depth)
-    v = self.split_heads(
-        v, batch_size)  # (batch_size, num_heads, seq_len_v, depth)
+    # (batch_size, num_heads, seq_len_q, depth)
+    q = self.split_heads(q, batch_size)
+    # (batch_size, num_heads, seq_len_k, depth)
+    k = self.split_heads(k, batch_size)
+    # (batch_size, num_heads, seq_len_v, depth)
+    v = self.split_heads(v, batch_size)
 
     # scaled_attention.shape == (batch_size, num_heads, seq_len_v, depth)
     # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
     scaled_attention, attention_weights = scaled_dot_product_attention(
         q, k, v, mask)
+    # (batch_size, seq_len_v, num_heads, depth)
+    scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
 
-    scaled_attention = tf.transpose(
-        scaled_attention, perm=[0, 2, 1,
-                                3])  # (batch_size, seq_len_v, num_heads, depth)
+    # (batch_size, seq_len_v, d_model)
+    concat_attention = tf.reshape(scaled_attention,
+                                  (batch_size, -1, self.d_model))
 
-    concat_attention = tf.reshape(
-        scaled_attention,
-        (batch_size, -1, self.d_model))  # (batch_size, seq_len_v, d_model)
-
-    output = self.dense(concat_attention)  # (batch_size, seq_len_v, d_model)
+    # (batch_size, seq_len_v, d_model)
+    output = self.dense(concat_attention)
 
     return output, attention_weights
 
 
 def point_wise_feed_forward_network(d_model, dff):
   return tf.keras.Sequential([
-      tf.keras.layers.Dense(dff,
-                            activation='relu'),  # (batch_size, seq_len, dff)
-      tf.keras.layers.Dense(d_model)  # (batch_size, seq_len, d_model)
+      # (batch_size, seq_len, dff)
+      tf.keras.layers.Dense(dff, activation='relu'),
+      # (batch_size, seq_len, d_model)
+      tf.keras.layers.Dense(d_model)
   ])
 
 
@@ -279,10 +303,8 @@ class EncoderLayer(tf.keras.layers.Layer):
     self.mha = MultiHeadAttention(d_model, num_heads)
     self.ffn = point_wise_feed_forward_network(d_model, dff)
 
-    self.layernorm1 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
+    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
     self.dropout1 = tf.keras.layers.Dropout(rate)
     self.dropout2 = tf.keras.layers.Dropout(rate)
@@ -313,12 +335,9 @@ class DecoderLayer(tf.keras.layers.Layer):
 
     self.ffn = point_wise_feed_forward_network(d_model, dff)
 
-    self.layernorm1 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
-    self.layernorm3 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
+    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
     self.dropout1 = tf.keras.layers.Dropout(rate)
     self.dropout2 = tf.keras.layers.Dropout(rate)
@@ -451,7 +470,8 @@ class Transformer(tf.keras.Model):
     self.decoder = Decoder(num_layers, d_model, num_heads, dff,
                            target_vocab_size, rate)
 
-    self.final_layer = tf.keras.layers.Dense(target_vocab_size)
+    self.final_layer = tf.keras.layers.Dense(
+        target_vocab_size, activation='softmax')
 
   def call(self, inp, tar, training, enc_padding_mask, look_ahead_mask,
            dec_padding_mask):
@@ -469,7 +489,6 @@ class Transformer(tf.keras.Model):
 
 
 EPOCHS = 5
-MAX_LENGTH = 40
 num_layers = 4
 d_model = 128
 dff = 512
@@ -519,12 +538,12 @@ checkpoint_path = "./checkpoints/train"
 
 ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
 
-ckpt_manager = tf.train.CheckpointManager(ckpt, checkpoint_path, max_to_keep=5)
+ckpt_manager = tf.train.CheckpointManager(ckpt, checkpoint_path, max_to_keep=3)
 
 # if a checkpoint exists, restore the latest checkpoint.
 if ckpt_manager.latest_checkpoint:
   ckpt.restore(ckpt_manager.latest_checkpoint)
-  print('Latest checkpoint restored!!')
+  print('Restored checkpoint {}'.format(ckpt_manager.latest_checkpoint))
 
 # Metrics
 train_loss = tf.keras.metrics.Mean(name='train_loss')
@@ -565,8 +584,9 @@ def eval_step(inputs, targets):
   enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
       inputs, decoder_inputs)
 
-  predictions, _ = transformer(inputs, decoder_inputs, True, enc_padding_mask,
+  predictions, _ = transformer(inputs, decoder_inputs, False, enc_padding_mask,
                                combined_mask, dec_padding_mask)
+
   loss = loss_function(targets, predictions)
 
   eval_loss(loss)
@@ -601,7 +621,7 @@ def train_and_evaluate(epochs):
       eval_step(inputs, targets)
 
     print('Epoch {} Loss {:.4f} Accuracy {:.2f} Eval Loss {:.4f} '
-          'Eval Accuracy {:.2f} Time {:.2f}s\n'.format(
+          'Eval Accuracy {:.2f} Time {:.2f}s'.format(
               epoch + 1,
               train_loss.result(),
               train_accuracy.result() * 100,
@@ -611,32 +631,25 @@ def train_and_evaluate(epochs):
           ))
 
     # save checkpoint every 2 epochs
-    if epoch % 2 == 0:
-      ckpt_save_path = ckpt_manager.save()
-      print('Saving checkpoint for epoch {} at {}'.format(
-          epoch + 1, ckpt_save_path))
+    ckpt_save_path = ckpt_manager.save()
+    print('Saving checkpoint for epoch {} at {}'.format(epoch + 1,
+                                                        ckpt_save_path))
+    print('')
 
 
-train_and_evaluate(epochs=EPOCHS)
+train_and_evaluate(epochs=10)
 
 
 def evaluate(sentence):
   sentence = preprocess_sentence(sentence)
 
-  print('Preprocessed sentence: {}'.format(sentence))
-
   # tokenize sentence
-  sentence = [
-      input_tokenizer.word_index[t]
-      for t in sentence.split(' ')
-      if t in input_tokenizer.word_index
-  ]
-
-  print('Tokenized sentence: {}'.format(sentence))
+  sentence = [input_tokenizer.word_index[t] for t in sentence.split(' ')]
 
   # pad tokens to fixed length
-  encoder_input = tf.keras.preprocessing.sequence.pad_sequences(
-      [sentence], maxlen=max_input_len, padding='post')
+  # encoder_input = tf.keras.preprocessing.sequence.pad_sequences(
+  #     [sentence], maxlen=MAX_LENGTH, padding='post')
+  encoder_input = tf.convert_to_tensor([sentence])
 
   decoder_input = [target_tokenizer.word_index[START_TAG]]
 
@@ -674,17 +687,18 @@ def evaluate(sentence):
 
 def translate(sentence):
   result, attention_weights = evaluate(sentence)
+  # remove START_TAG
+  result = result.numpy()
 
-  print('Tokenized output: {}'.format(result))
+  print('Token Output {}'.format(result))
+
   # convert from tokens to words
-  predicted_sentence = [
-      target_tokenizer.index_word[int(t)]
-      for t in result
-      if int(t) in target_tokenizer.index_word
-  ]
+  predicted_sentence = [target_tokenizer.index_word[int(t)] for t in result]
 
   print('Input: {}'.format(sentence))
   print('Output: {}'.format(' '.join(predicted_sentence)))
 
 
-translate('This is my head')
+translate('Where have you been?')
+translate('How are you?')
+translate('My mother had me tested.')
