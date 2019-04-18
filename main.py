@@ -1,17 +1,14 @@
 import os
 import re
 import time
-import pickle
 import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
 import tensorflow_datasets as tfds
 from sklearn.model_selection import train_test_split
 
 tf.compat.v1.logging.set_verbosity('ERROR')
-
-tf.random.set_seed(1234)
-np.random.seed(1234)
 
 # Download and extract dataset
 path_to_zip = tf.keras.utils.get_file(
@@ -63,8 +60,8 @@ def load_conversations():
         input = preprocess_sentence(id2line[conversation[i]])
         target = preprocess_sentence(id2line[conversation[i + 1]])
         if max([len(input), len(target)]) <= MAX_LENGTH:
-          inputs.append(tf.convert_to_tensor(input))
-          targets.append(tf.convert_to_tensor(target))
+          inputs.append(input)
+          targets.append(target)
           count += 1
           if count >= NUM_SAMPLES:
             return inputs, targets
@@ -73,12 +70,14 @@ def load_conversations():
 
 questions, answers = load_conversations()
 
-tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
-    [s.numpy() for s in questions + answers], target_vocab_size=2**13)
+print('Sample question: {}'.format(questions[0]))
+print('Sample answer: {}'.format(answers[0]))
 
-# split into train and evaluation sets using 80-20 split
+tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
+    questions + answers, target_vocab_size=2**13)
+
 train_questions, eval_questions, train_answers, eval_answers = train_test_split(
-    questions, answers, test_size=0.2, random_state=1234, shuffle=True)
+    questions, answers, test_size=0.2, shuffle=True)
 
 print('Train set size: {}'.format(len(train_questions)))
 print('Evaluation set size: {}'.format(len(eval_questions)))
@@ -146,11 +145,10 @@ def create_padding_mask(seq):
 
 
 def create_look_ahead_mask(size):
-  mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-  return mask  # (seq_len, seq_len)
+  return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
 
 
-def scaled_dot_product_attention(q, k, v, mask):
+def scaled_dot_product_attention(query, key, value, mask):
   """Calculate the attention weights.
   q, k, v must have matching leading dimensions.
   The mask has different shapes depending on its type(padding or look ahead) 
@@ -167,23 +165,22 @@ def scaled_dot_product_attention(q, k, v, mask):
     output, attention_weights
   """
   # (..., seq_len_q, seq_len_k)
-  matmul_qk = tf.matmul(q, k, transpose_b=True)
+  matmul_qk = tf.matmul(query, key, transpose_b=True)
 
   # scale matmul_qk
-  dk = tf.cast(tf.shape(k)[-1], tf.float32)
-  scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+  depth = tf.cast(tf.shape(key)[-1], tf.float32)
+  scaled_attention_logits = matmul_qk / tf.math.sqrt(depth)
 
   # add the mask to the scaled tensor.
   if mask is not None:
     scaled_attention_logits += (mask * -1e9)
 
-  # softmax is normalized on the last axis (seq_len_k) so that the scores
-  # add up to 1.
+  # softmax is normalized on the last axis (seq_len_k)
   # (..., seq_len_q, seq_len_k)
   attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
 
   # (..., seq_len_v, depth)
-  output = tf.matmul(attention_weights, v)
+  output = tf.matmul(attention_weights, value)
 
   return output, attention_weights
 
