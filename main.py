@@ -3,17 +3,15 @@ import re
 import time
 import pickle
 import numpy as np
-from tqdm import tqdm
 import tensorflow as tf
+from tqdm.auto import tqdm
 import tensorflow_datasets as tfds
 from sklearn.model_selection import train_test_split
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+tf.compat.v1.logging.set_verbosity('ERROR')
 
 tf.random.set_seed(1234)
 np.random.seed(1234)
-
-MAX_LENGTH = 40
 
 # Download and extract dataset
 path_to_zip = tf.keras.utils.get_file(
@@ -28,6 +26,9 @@ path_to_dataset = os.path.join(
 path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
+
+MAX_LENGTH = 40
+NUM_SAMPLES = 40000
 
 
 def preprocess_sentence(sentence):
@@ -52,6 +53,7 @@ def load_conversations():
       id2line[parts[0]] = parts[4]
 
   inputs, targets = [], []
+  count = 0
   with open(path_to_movie_conversations, 'r') as file:
     for line in file:
       parts = line.replace('\n', '').split(' +++$+++ ')
@@ -63,29 +65,20 @@ def load_conversations():
         if max([len(input), len(target)]) <= MAX_LENGTH:
           inputs.append(tf.convert_to_tensor(input))
           targets.append(tf.convert_to_tensor(target))
+          count += 1
+          if count >= NUM_SAMPLES:
+            return inputs, targets
   return inputs, targets
 
 
-PICKLE_PATH = 'dataset.pkl'
+questions, answers = load_conversations()
 
-if os.path.exists(PICKLE_PATH):
-  with open(PICKLE_PATH, 'rb') as file:
-    data = pickle.load(file)
-  train_questions, eval_questions, train_answers, eval_answers, tokenizer = data
-else:
-  questions, answers = load_conversations()
+tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
+    [s.numpy() for s in questions + answers], target_vocab_size=2**13)
 
-  tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
-      [s.numpy() for s in questions + answers], target_vocab_size=2**13)
-
-  # split into train and evaluation sets using 80-20 split
-  train_questions, eval_questions, train_answers, eval_answers = train_test_split(
-      questions, answers, test_size=0.2, random_state=1234, shuffle=True)
-
-  with open(PICKLE_PATH, 'wb') as file:
-    pickle.dump([
-        train_questions, eval_questions, train_answers, eval_answers, tokenizer
-    ], file)
+# split into train and evaluation sets using 80-20 split
+train_questions, eval_questions, train_answers, eval_answers = train_test_split(
+    questions, answers, test_size=0.2, random_state=1234, shuffle=True)
 
 print('Train set size: {}'.format(len(train_questions)))
 print('Evaluation set size: {}'.format(len(eval_questions)))
@@ -268,10 +261,8 @@ class EncoderLayer(tf.keras.layers.Layer):
     self.mha = MultiHeadAttention(d_model, num_heads)
     self.ffn = point_wise_feed_forward_network(d_model, dff)
 
-    self.layernorm1 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
+    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
     self.dropout1 = tf.keras.layers.Dropout(dropout)
     self.dropout2 = tf.keras.layers.Dropout(dropout)
@@ -302,12 +293,9 @@ class DecoderLayer(tf.keras.layers.Layer):
 
     self.ffn = point_wise_feed_forward_network(d_model, dff)
 
-    self.layernorm1 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
-    self.layernorm3 = tf.keras.layers.experimental.LayerNormalization(
-        epsilon=1e-6)
+    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
     self.dropout1 = tf.keras.layers.Dropout(dropout)
     self.dropout2 = tf.keras.layers.Dropout(dropout)
@@ -461,8 +449,8 @@ NUM_LAYERS = 4
 D_MODEL = 128
 DFF = 512
 NUM_HEADS = 8
-DROPOUT = 0.1
-EPOCHS = 10
+DROPOUT = 0.4
+EPOCHS = 30
 
 transformer = Transformer(NUM_LAYERS, D_MODEL, NUM_HEADS, DFF, VOCAB_SIZE,
                           DROPOUT)
@@ -576,44 +564,42 @@ def eval_step(questions, answers):
   eval_accuracy(real_answers, predictions)
 
 
-def train(epochs):
-  num_batch = len(train_questions) // BATCH_SIZE
+NUM_BATCH = int(np.ceil(len(train_questions) / BATCH_SIZE))
 
-  for epoch in range(epochs):
-    # reset metrics
-    train_loss.reset_states()
-    train_accuracy.reset_states()
-    eval_loss.reset_states()
-    eval_accuracy.reset_states()
+for epoch in range(EPOCHS):
+  # reset metrics
+  train_loss.reset_states()
+  train_accuracy.reset_states()
+  eval_loss.reset_states()
+  eval_accuracy.reset_states()
 
-    print('Epoch {}'.format(epoch + 1))
-    start = time.time()
+  print('Epoch {}'.format(epoch + 1))
+  start = time.time()
 
-    with tqdm(total=num_batch) as pbar:
-      for (batch, (inp, tar)) in enumerate(train_ds):
-        train_step(inp, tar)
-        pbar.update(1)
+  with tqdm(total=NUM_BATCH) as pbar:
+    for (batch, (inp, tar)) in enumerate(train_ds):
+      train_step(inp, tar)
+      pbar.update(1)
 
-    end = time.time()
+  end = time.time()
 
-    for inp, tar in eval_ds:
-      eval_step(inp, tar)
+  for inp, tar in eval_ds:
+    eval_step(inp, tar)
 
-    print('Epoch {} Loss {:.4f} Accuracy {:.2f} Eval Loss {:.4f} '
-          'Eval Accuracy {:.2f} Time {:.2f}s'.format(
-              epoch + 1,
-              train_loss.result(),
-              train_accuracy.result() * 100,
-              eval_loss.result(),
-              eval_accuracy.result() * 100,
-              end - start,
-          ))
+  print('Train Loss {:.4f} Train Accuracy {:.2f} Eval Loss {:.4f} '
+        'Eval Accuracy {:.2f} Time {:.2f}s'.format(
+            train_loss.result(),
+            train_accuracy.result() * 100,
+            eval_loss.result(),
+            eval_accuracy.result() * 100,
+            end - start,
+        ))
 
+  if epoch % 2 == 0:
     ckpt_save_path = ckpt_manager.save()
     print('Saved checkpoint {}'.format(ckpt_save_path))
 
-
-train(epochs=10)
+  print('')
 
 
 def evaluate(question):
@@ -655,16 +641,20 @@ def evaluate(question):
   return tf.squeeze(output, axis=0), attention_weights
 
 
-def predict(sentence):
-  result, attention_weights = evaluate(sentence)
+def predict(question):
+  result, attention_weights = evaluate(question)
 
   predicted_sentence = tokenizer.decode(
       [i for i in result if i < tokenizer.vocab_size])
 
-  print('Input: {}'.format(sentence))
+  print('Input: {}'.format(question))
   print('Output: {}'.format(predicted_sentence))
 
+  return predicted_sentence
 
-predict('How are you?')
-predict('My mother had me tested!')
-predict('Where have you been?')
+
+# test the model with its previous output as input
+sentence = 'I am not crazy, my mother had me tested.'
+for _ in range(5):
+  sentence = predict(sentence)
+  print('')
