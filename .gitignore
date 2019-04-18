@@ -106,5 +106,5 @@ venv.bak/
 .idea/
 .DS_Store
 __MACOSX/
-checkpoints/
+runs/
 *.pkl
