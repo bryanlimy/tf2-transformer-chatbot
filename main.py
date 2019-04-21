@@ -25,7 +25,7 @@ path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
 
 MAX_LENGTH = 40
-NUM_SAMPLES = 10000
+NUM_SAMPLES = 500000
 
 
 def preprocess_sentence(sentence):
@@ -112,10 +112,13 @@ BATCH_SIZE = 64
 VOCAB_SIZE = tokenizer.vocab_size + 2
 
 train_ds = tf.data.Dataset.from_tensor_slices((train_questions, train_answers))
-train_ds = train_ds.cache().shuffle(BUFFER_SIZE).prefetch(
-    tf.data.experimental.AUTOTUNE)
+train_ds = train_ds.cache()
+train_ds = train_ds.shuffle(BUFFER_SIZE)
+train_ds = train_ds.padded_batch(BATCH_SIZE, padded_shapes=([-1], [-1]))
+train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
 
 eval_ds = tf.data.Dataset.from_tensor_slices((eval_questions, eval_answers))
+eval_ds = eval_ds.padded_batch(BATCH_SIZE, padded_shapes=([-1], [-1]))
 
 
 def get_angles(pos, i, d_model):
