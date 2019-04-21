@@ -6,7 +6,6 @@ import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
 import tensorflow_datasets as tfds
-from sklearn.model_selection import train_test_split
 
 tf.compat.v1.logging.set_verbosity('ERROR')
 
@@ -24,7 +23,7 @@ path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
 
-NUM_SAMPLES = 10000
+NUM_SAMPLES = 25000
 
 
 def preprocess_sentence(sentence):
@@ -72,8 +71,8 @@ print('Sample answer: {}'.format(answers[0]))
 tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
     questions + answers, target_vocab_size=2**13)
 
-MAX_LENGTH = 40
 START_TOKEN, END_TOKEN = [tokenizer.vocab_size], [tokenizer.vocab_size + 1]
+MAX_LENGTH = 40
 
 
 # Tokenize, filter and pad sentences
@@ -112,34 +111,11 @@ train_ds = train_ds.batch(BATCH_SIZE)
 train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
 
 
-def get_angles(pos, i, d_model):
-  angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
-  return pos * angle_rates
-
-
-def positional_encoding(position, d_model):
-  angle_rads = get_angles(
-      np.arange(position)[:, np.newaxis],
-      np.arange(d_model)[np.newaxis, :], d_model)
-
-  # apply sin to even indices in the array; 2i
-  sines = np.sin(angle_rads[:, 0::2])
-
-  # apply cos to odd indices in the array; 2i+1
-  cosines = np.cos(angle_rads[:, 1::2])
-
-  pos_encoding = np.concatenate([sines, cosines], axis=-1)
-
-  pos_encoding = pos_encoding[np.newaxis, ...]
-
-  return tf.cast(pos_encoding, dtype=tf.float32)
-
-
 # Mask all the pad tokens (value `0`) in the batch to ensure the model does not
 # treat padding as input.
-def create_padding_mask(seq):
-  seq = tf.cast(tf.math.equal(seq, 0), tf.float32)
-  return seq[:, tf.newaxis, tf.newaxis, :]
+def create_padding_mask(sequence):
+  sequence = tf.cast(tf.math.equal(sequence, 0), tf.float32)
+  return sequence[:, tf.newaxis, tf.newaxis, :]
 
 
 # Look-ahead mask to mask the future tokens in a sequence.
@@ -197,9 +173,9 @@ class MultiHeadAttention(tf.keras.layers.Layer):
 
     self.depth = d_model // self.num_heads
 
-    self.wq = tf.keras.layers.Dense(units=d_model)
-    self.wk = tf.keras.layers.Dense(units=d_model)
-    self.wv = tf.keras.layers.Dense(units=d_model)
+    self.query_dense = tf.keras.layers.Dense(units=d_model)
+    self.key_dense = tf.keras.layers.Dense(units=d_model)
+    self.value_dense = tf.keras.layers.Dense(units=d_model)
 
     self.dense = tf.keras.layers.Dense(units=d_model)
 
@@ -207,28 +183,56 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
     return tf.transpose(x, perm=[0, 2, 1, 3])
 
-  def call(self, v, k, q, mask):
-    batch_size = tf.shape(q)[0]
+  def call(self, inputs, key, value, mask):
+    batch_size = tf.shape(inputs)[0]
 
-    q = self.wq(q)
-    k = self.wk(k)
-    v = self.wv(v)
+    # linear layers
+    query = self.query_dense(inputs)
+    key = self.key_dense(key)
+    value = self.value_dense(value)
 
-    q = self.split_heads(q, batch_size)
-    k = self.split_heads(k, batch_size)
-    v = self.split_heads(v, batch_size)
+    # split heads
+    query = self.split_heads(query, batch_size)
+    key = self.split_heads(key, batch_size)
+    value = self.split_heads(value, batch_size)
 
+    # scaled dot-product attention
     scaled_attention, attention_weights = scaled_dot_product_attention(
-        q, k, v, mask)
+        query, key, value, mask)
 
     scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
 
+    # concatenation of heads
     concat_attention = tf.reshape(scaled_attention,
                                   (batch_size, -1, self.d_model))
 
-    output = self.dense(concat_attention)
+    # final linear layer
+    outputs = self.dense(concat_attention)
 
-    return output, attention_weights
+    return outputs, attention_weights
+
+
+def get_angles(pos, i, d_model):
+  angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
+  return pos * angle_rates
+
+
+def positional_encoding(position, d_model):
+  angle_rads = get_angles(
+      np.arange(position)[:, np.newaxis],
+      np.arange(d_model)[np.newaxis, :], d_model)
+
+  # apply sin to even indices in the array; 2i
+  sines = np.sin(angle_rads[:, 0::2])
+
+  # apply cos to odd indices in the array; 2i+1
+  cosines = np.cos(angle_rads[:, 1::2])
+
+  pos_encoding = np.concatenate([sines, cosines], axis=-1)
+
+  pos_encoding = pos_encoding[np.newaxis, ...]
+
+  return tf.cast(pos_encoding, dtype=tf.float32)
 
 
 def point_wise_feed_forward_network(d_model, units):
@@ -252,20 +256,17 @@ class EncoderLayer(tf.keras.layers.Layer):
     self.dropout1 = tf.keras.layers.Dropout(rate=dropout)
     self.dropout2 = tf.keras.layers.Dropout(rate=dropout)
 
-  def call(self, x, training, mask):
-    # (batch_size, input_seq_len, d_model)
-    attn_output, _ = self.mha(x, x, x, mask)
-    attn_output = self.dropout1(attn_output, training=training)
-    # (batch_size, input_seq_len, d_model)
-    out1 = self.layernorm1(x + attn_output)
+  def call(self, inputs, padding_mask, training=False):
 
-    # (batch_size, input_seq_len, d_model)
-    ffn_output = self.ffn(out1)
-    ffn_output = self.dropout2(ffn_output, training=training)
-    # (batch_size, input_seq_len, d_model)
-    out2 = self.layernorm2(out1 + ffn_output)
+    attn, _ = self.mha(inputs, key=inputs, value=inputs, mask=padding_mask)
+    attn = self.dropout1(attn, training=training)
+    attn = self.layernorm1(inputs + attn)
 
-    return out2
+    ffn = self.ffn(attn)
+    ffn = self.dropout2(ffn, training=training)
+    outputs = self.layernorm2(attn + ffn)
+
+    return outputs
 
 
 class Encoder(tf.keras.layers.Layer):
@@ -292,18 +293,19 @@ class Encoder(tf.keras.layers.Layer):
 
     self.dropout = tf.keras.layers.Dropout(rate=dropout)
 
-  def call(self, x, training, mask):
-    seq_len = tf.shape(x)[1]
+  def call(self, inputs, padding_mask, training=False):
+    seq_len = tf.shape(inputs)[1]
 
-    x = self.embedding(x)
-    x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
-    x += self.pos_encoding[:, :seq_len, :]
+    embeddings = self.embedding(inputs)
+    embeddings *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+    embeddings += self.pos_encoding[:, :seq_len, :]
 
-    x = self.dropout(x, training=training)
+    outputs = self.dropout(embeddings, training=training)
 
     for i in range(self.num_layers):
-      x = self.enc_layers[i](x, training, mask)
-    return x
+      outputs = self.enc_layers[i](
+          outputs, padding_mask=padding_mask, training=training)
+    return outputs
 
 
 class DecoderLayer(tf.keras.layers.Layer):
@@ -324,21 +326,27 @@ class DecoderLayer(tf.keras.layers.Layer):
     self.dropout2 = tf.keras.layers.Dropout(rate=dropout)
     self.dropout3 = tf.keras.layers.Dropout(rate=dropout)
 
-  def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
-    attn1, attn_weights_block1 = self.mha1(x, x, x, look_ahead_mask)
+  def call(self,
+           inputs,
+           enc_output,
+           look_ahead_mask,
+           padding_mask,
+           training=False):
+    attn1, attn_weights_block1 = self.mha1(
+        inputs, key=inputs, value=inputs, mask=look_ahead_mask)
     attn1 = self.dropout1(attn1, training=training)
-    out1 = self.layernorm1(attn1 + x)
+    attn1 = self.layernorm1(attn1 + inputs)
 
-    attn2, attn_weights_block2 = self.mha2(enc_output, enc_output, out1,
-                                           padding_mask)
+    attn2, attn_weights_block2 = self.mha2(
+        attn1, key=enc_output, value=enc_output, mask=padding_mask)
     attn2 = self.dropout2(attn2, training=training)
-    out2 = self.layernorm2(attn2 + out1)
+    attn2 = self.layernorm2(attn2 + attn1)
 
-    ffn_output = self.ffn(out2)
-    ffn_output = self.dropout3(ffn_output, training=training)
-    out3 = self.layernorm3(ffn_output + out2)
+    ffn = self.ffn(attn2)
+    ffn = self.dropout3(ffn, training=training)
+    outputs = self.layernorm3(ffn + attn2)
 
-    return out3, attn_weights_block1, attn_weights_block2
+    return outputs, attn_weights_block1, attn_weights_block2
 
 
 class Decoder(tf.keras.layers.Layer):
@@ -364,25 +372,33 @@ class Decoder(tf.keras.layers.Layer):
     ]
     self.dropout = tf.keras.layers.Dropout(rate=dropout)
 
-  def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
-    seq_len = tf.shape(x)[1]
+  def call(self,
+           inputs,
+           enc_output,
+           look_ahead_mask,
+           padding_mask,
+           training=False):
+    seq_len = tf.shape(inputs)[1]
     attention_weights = {}
 
-    x = self.embedding(x)
-    x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
-    x += self.pos_encoding[:, :seq_len, :]
+    embeddings = self.embedding(inputs)
+    embeddings *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+    embeddings += self.pos_encoding[:, :seq_len, :]
 
-    x = self.dropout(x, training=training)
+    outputs = self.dropout(embeddings, training=training)
 
     for i in range(self.num_layers):
-      x, block1, block2 = self.dec_layers[i](x, enc_output, training,
-                                             look_ahead_mask, padding_mask)
+      outputs, block1, block2 = self.dec_layers[i](
+          outputs,
+          enc_output=enc_output,
+          look_ahead_mask=look_ahead_mask,
+          padding_mask=padding_mask,
+          training=training)
 
       attention_weights['decoder_layer{}_block1'.format(i + 1)] = block1
       attention_weights['decoder_layer{}_block2'.format(i + 1)] = block2
 
-    # x.shape == (batch_size, target_seq_len, d_model)
-    return x, attention_weights
+    return outputs, attention_weights
 
 
 class Transformer(tf.keras.Model):
@@ -411,10 +427,15 @@ class Transformer(tf.keras.Model):
            look_ahead_mask,
            dec_padding_mask,
            training=False):
-    enc_output = self.encoder(inputs, training, enc_padding_mask)
+    enc_output = self.encoder(
+        inputs, padding_mask=enc_padding_mask, training=training)
 
     dec_output, attention_weights = self.decoder(
-        dec_inputs, enc_output, training, look_ahead_mask, dec_padding_mask)
+        dec_inputs,
+        enc_output=enc_output,
+        look_ahead_mask=look_ahead_mask,
+        padding_mask=dec_padding_mask,
+        training=training)
 
     outputs = self.dense(dec_output)
 
@@ -422,9 +443,9 @@ class Transformer(tf.keras.Model):
 
 
 NUM_LAYERS = 4
-D_MODEL = 256
+D_MODEL = 512
 NUM_HEADS = 8
-UNITS = 512
+UNITS = 1024
 DROPOUT = 0.1
 
 transformer = Transformer(
@@ -472,7 +493,6 @@ def loss_function(real, pred):
   return tf.reduce_mean(loss_)
 
 
-# Metrics
 train_loss = tf.keras.metrics.Mean(name='loss')
 train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
 
