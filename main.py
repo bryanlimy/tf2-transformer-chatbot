@@ -24,7 +24,7 @@ path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
 
-NUM_SAMPLES = 25000
+NUM_SAMPLES = 10000
 
 
 def preprocess_sentence(sentence):
@@ -50,7 +50,6 @@ def load_conversations():
     id2line[parts[0]] = parts[4]
 
   inputs, outputs = [], []
-
   with open(path_to_movie_conversations, 'r') as file:
     lines = file.readlines()
   for line in lines:
@@ -65,22 +64,30 @@ def load_conversations():
   return inputs, outputs
 
 
+questions, answers = load_conversations()
+
+print('Sample question: {}'.format(questions[0]))
+print('Sample answer: {}'.format(answers[0]))
+
+tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
+    questions + answers, target_vocab_size=2**13)
+
 MAX_LENGTH = 40
+START_TOKEN, END_TOKEN = [tokenizer.vocab_size], [tokenizer.vocab_size + 1]
 
 
-def tokenize_and_filter(tokenizer, inputs, outputs):
+# Tokenize, filter and pad sentences
+def tokenize_and_filter(inputs, outputs):
   tokenized_inputs, tokenized_outputs = [], []
-  start_token, end_token = [tokenizer.vocab_size], [tokenizer.vocab_size + 1]
   for (input, output) in zip(inputs, outputs):
     # tokenize sentence
-    input = start_token + tokenizer.encode(input) + end_token
-    output = start_token + tokenizer.encode(output) + end_token
+    tokenized_input = START_TOKEN + tokenizer.encode(input) + END_TOKEN
+    tekenized_output = START_TOKEN + tokenizer.encode(output) + END_TOKEN
     # check tokenized sentence max length
-    if len(input) <= MAX_LENGTH and len(output) <= MAX_LENGTH:
-      tokenized_inputs.append(input)
-      tokenized_outputs.append(output)
-    if len(tokenized_inputs) >= NUM_SAMPLES:
-      break
+    if len(tokenized_input) <= MAX_LENGTH and len(
+        tekenized_output) <= MAX_LENGTH:
+      tokenized_inputs.append(tokenized_input)
+      tokenized_outputs.append(tekenized_output)
   # pad tokenized sentences
   tokenized_inputs = tf.keras.preprocessing.sequence.pad_sequences(
       tokenized_inputs, maxlen=MAX_LENGTH, padding='post')
@@ -89,42 +96,20 @@ def tokenize_and_filter(tokenizer, inputs, outputs):
   return tokenized_inputs, tokenized_outputs
 
 
-if os.path.exists('dataset.pkl'):
-  with open('dataset.pkl', 'rb') as file:
-    [questions, answers, tokenizer] = pickle.load(file)
-else:
-  questions, answers = load_conversations()
+questions, answers = tokenize_and_filter(questions, answers)
 
-  print('Sample question: {}'.format(questions[0]))
-  print('Sample answer: {}'.format(answers[0]))
-
-  tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
-      questions + answers, target_vocab_size=2**13)
-
-  questions, answers = tokenize_and_filter(tokenizer, questions, answers)
-
-  with open('dataset.pkl', 'wb') as file:
-    pickle.dump([questions, answers, tokenizer], file)
-
-train_questions, eval_questions, train_answers, eval_answers = train_test_split(
-    questions, answers, test_size=0.2, shuffle=True)
-
-print('Train set size: {}'.format(len(train_questions)))
-print('Evaluation set size: {}'.format(len(eval_questions)))
+print('Train set size: {}'.format(len(questions)))
 print('Vocab size: {}'.format(tokenizer.vocab_size))
 
-BUFFER_SIZE = 20000
 BATCH_SIZE = 64
+BUFFER_SIZE = 20000
 VOCAB_SIZE = tokenizer.vocab_size + 2
 
-train_ds = tf.data.Dataset.from_tensor_slices((train_questions, train_answers))
+train_ds = tf.data.Dataset.from_tensor_slices((questions, answers))
 train_ds = train_ds.cache()
 train_ds = train_ds.shuffle(BUFFER_SIZE)
 train_ds = train_ds.batch(BATCH_SIZE)
 train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
-
-eval_ds = tf.data.Dataset.from_tensor_slices((eval_questions, eval_answers))
-eval_ds = eval_ds.batch(BATCH_SIZE)
 
 
 def get_angles(pos, i, d_model):
@@ -164,22 +149,7 @@ def create_look_ahead_mask(size):
 
 
 def scaled_dot_product_attention(query, key, value, mask):
-  """Calculate the attention weights.
-  q, k, v must have matching leading dimensions.
-  The mask has different shapes depending on its type(padding or look ahead) 
-  but it must be broadcastable for addition.
-
-  Args:
-    q: query shape == (..., seq_len_q, depth)
-    k: key shape == (..., seq_len_k, depth)
-    v: value shape == (..., seq_len_v, depth)
-    mask: Float tensor with shape broadcastable 
-          to (..., seq_len_q, seq_len_k). Defaults to None.
-
-  Returns:
-    output, attention_weights
-  """
-  # (..., seq_len_q, seq_len_k)
+  """Calculate the attention weights. """
   matmul_qk = tf.matmul(query, key, transpose_b=True)
 
   # scale matmul_qk
@@ -435,7 +405,7 @@ NUM_LAYERS = 4
 D_MODEL = 256
 NUM_HEADS = 8
 UNITS = 512
-DROPOUT = 0.3
+DROPOUT = 0.1
 
 transformer = Transformer(
     num_layers=NUM_LAYERS,
@@ -483,11 +453,8 @@ def loss_function(real, pred):
 
 
 # Metrics
-train_loss = tf.keras.metrics.Mean(name='train_loss')
-train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
-    name='train_accuracy')
-eval_loss = tf.keras.metrics.Mean(name='eval_loss')
-eval_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
+train_loss = tf.keras.metrics.Mean(name='loss')
+train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
 
 CKPT_PATH = "runs/"
 ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
@@ -516,55 +483,38 @@ def create_masks(inputs, outputs):
 
 
 @tf.function
-def train_step(questions, answers):
-  decoder_inputs = answers[:, :-1]
-  real_answers = answers[:, 1:]
+def train_step(inputs, targets):
+  # use teacher forcing, decoder use the previous target as input
+  decoder_inputs = targets[:, :-1]
+  # remove START_TOKEN from targets
+  cropped_targets = targets[:, 1:]
 
   enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
       questions, decoder_inputs)
 
   with tf.GradientTape() as tape:
-    predictions, _ = transformer(questions, decoder_inputs, True,
-                                 enc_padding_mask, combined_mask,
-                                 dec_padding_mask)
-    loss = loss_function(real_answers, predictions)
+    predictions, _ = transformer(inputs, decoder_inputs, True, enc_padding_mask,
+                                 combined_mask, dec_padding_mask)
+    loss = loss_function(cropped_targets, predictions)
 
   gradients = tape.gradient(loss, transformer.trainable_variables)
   optimizer.apply_gradients(zip(gradients, transformer.trainable_variables))
 
   train_loss(loss)
-  train_accuracy(real_answers, predictions)
-
-
-@tf.function
-def eval_step(questions, answers):
-  decoder_inputs = answers[:, :-1]
-  real_answers = answers[:, 1:]
-
-  enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
-      questions, decoder_inputs)
-
-  predictions, _ = transformer(questions, decoder_inputs, False,
-                               enc_padding_mask, combined_mask,
-                               dec_padding_mask)
-  loss = loss_function(real_answers, predictions)
-
-  eval_loss(loss)
-  eval_accuracy(real_answers, predictions)
+  train_accuracy(cropped_targets, predictions)
 
 
 EPOCHS = 20
 # Number of batches per epoch
-NUM_BATCH = int(np.ceil(len(train_questions) / BATCH_SIZE))
+NUM_BATCH = int(np.ceil(len(questions) / BATCH_SIZE))
 
 for epoch in range(EPOCHS):
   # reset metrics
   train_loss.reset_states()
   train_accuracy.reset_states()
-  eval_loss.reset_states()
-  eval_accuracy.reset_states()
 
   print('Epoch {}'.format(epoch + 1))
+
   start = time.time()
 
   with tqdm(total=NUM_BATCH) as pbar:
@@ -574,17 +524,11 @@ for epoch in range(EPOCHS):
 
   end = time.time()
 
-  for inputs, targets in eval_ds:
-    eval_step(inputs, targets)
-
-  print('Train Loss {:.4f} Train Accuracy {:.2f} Eval Loss {:.4f} '
-        'Eval Accuracy {:.2f} Time {:.2f}s'.format(
-            train_loss.result(),
-            train_accuracy.result() * 100,
-            eval_loss.result(),
-            eval_accuracy.result() * 100,
-            end - start,
-        ))
+  print('Loss {:.4f} Accuracy {:.2f} Time {:.2f}s'.format(
+      train_loss.result(),
+      train_accuracy.result() * 100,
+      end - start,
+  ))
 
   if epoch % 2 == 0:
     ckpt_save_path = ckpt_manager.save()
@@ -593,32 +537,23 @@ for epoch in range(EPOCHS):
   print('')
 
 
-def evaluate(question):
-  start_token = [tokenizer.vocab_size]
-  end_token = [tokenizer.vocab_size + 1]
+def evaluate(sentence):
+  sentence = tf.expand_dims(
+      START_TOKEN + tokenizer.encode(sentence) + END_TOKEN, axis=0)
 
-  # inp sentence is portuguese, hence adding the start and end token
-  question = start_token + tokenizer.encode(question) + end_token
-  encoder_input = tf.expand_dims(question, 0)
-
-  # as the target is english, the first word to the transformer should be the
-  # english start token.
-  decoder_input = [tokenizer.vocab_size]
-  output = tf.expand_dims(decoder_input, 0)
+  output = tf.expand_dims(START_TOKEN, 0)
 
   for i in range(MAX_LENGTH):
     enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
-        encoder_input, output)
+        sentence, output)
 
     # predictions.shape == (batch_size, seq_len, vocab_size)
     predictions, attention_weights = transformer(
-        encoder_input, output, False, enc_padding_mask, combined_mask,
+        sentence, output, False, enc_padding_mask, combined_mask,
         dec_padding_mask)
 
     # select the last word from the seq_len dimension
-    # (batch_size, 1, vocab_size)
     predictions = predictions[:, -1:, :]
-
     predicted_id = tf.cast(tf.argmax(predictions, axis=-1), tf.int32)
 
     # return the result if the predicted_id is equal to the end token
@@ -632,13 +567,13 @@ def evaluate(question):
   return tf.squeeze(output, axis=0), attention_weights
 
 
-def predict(question):
-  result, attention_weights = evaluate(question)
+def predict(sentence):
+  prediction, attention_weights = evaluate(sentence)
 
   predicted_sentence = tokenizer.decode(
-      [i for i in result if i < tokenizer.vocab_size])
+      [i for i in prediction if i < tokenizer.vocab_size])
 
-  print('Input: {}'.format(question))
+  print('Input: {}'.format(sentence))
   print('Output: {}'.format(predicted_sentence))
 
   return predicted_sentence
