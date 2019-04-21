@@ -24,8 +24,7 @@ path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
 
-MAX_LENGTH = 40
-NUM_SAMPLES = 500000
+NUM_SAMPLES = 25000
 
 
 def preprocess_sentence(sentence):
@@ -45,21 +44,28 @@ def load_conversations():
   # dictionary of line id to text
   id2line = {}
   with open(path_to_movie_lines, errors='ignore') as file:
-    for line in file:
-      parts = line.replace('\n', '').split(' +++$+++ ')
-      id2line[parts[0]] = parts[4]
+    lines = file.readlines()
+  for line in lines:
+    parts = line.replace('\n', '').split(' +++$+++ ')
+    id2line[parts[0]] = parts[4]
 
   inputs, outputs = [], []
 
   with open(path_to_movie_conversations, 'r') as file:
-    for line in file:
-      parts = line.replace('\n', '').split(' +++$+++ ')
-      # get conversation in a list of line ID
-      conversation = [line[1:-1] for line in parts[3][1:-1].split(', ')]
-      for i in range(len(conversation) - 1):
-        inputs.append(preprocess_sentence(id2line[conversation[i]]))
-        outputs.append(preprocess_sentence(id2line[conversation[i + 1]]))
+    lines = file.readlines()
+  for line in lines:
+    parts = line.replace('\n', '').split(' +++$+++ ')
+    # get conversation in a list of line ID
+    conversation = [line[1:-1] for line in parts[3][1:-1].split(', ')]
+    for i in range(len(conversation) - 1):
+      inputs.append(preprocess_sentence(id2line[conversation[i]]))
+      outputs.append(preprocess_sentence(id2line[conversation[i + 1]]))
+      if len(inputs) >= NUM_SAMPLES:
+        return inputs, outputs
   return inputs, outputs
+
+
+MAX_LENGTH = 40
 
 
 def tokenize_and_filter(tokenizer, inputs, outputs):
@@ -114,11 +120,11 @@ VOCAB_SIZE = tokenizer.vocab_size + 2
 train_ds = tf.data.Dataset.from_tensor_slices((train_questions, train_answers))
 train_ds = train_ds.cache()
 train_ds = train_ds.shuffle(BUFFER_SIZE)
-train_ds = train_ds.padded_batch(BATCH_SIZE, padded_shapes=([-1], [-1]))
+train_ds = train_ds.batch(BATCH_SIZE)
 train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
 
 eval_ds = tf.data.Dataset.from_tensor_slices((eval_questions, eval_answers))
-eval_ds = eval_ds.padded_batch(BATCH_SIZE, padded_shapes=([-1], [-1]))
+eval_ds = eval_ds.batch(BATCH_SIZE)
 
 
 def get_angles(pos, i, d_model):
@@ -203,11 +209,11 @@ class MultiHeadAttention(tf.keras.layers.Layer):
 
     self.depth = d_model // self.num_heads
 
-    self.wq = tf.keras.layers.Dense(d_model)
-    self.wk = tf.keras.layers.Dense(d_model)
-    self.wv = tf.keras.layers.Dense(d_model)
+    self.wq = tf.keras.layers.Dense(units=d_model)
+    self.wk = tf.keras.layers.Dense(units=d_model)
+    self.wv = tf.keras.layers.Dense(units=d_model)
 
-    self.dense = tf.keras.layers.Dense(d_model)
+    self.dense = tf.keras.layers.Dense(units=d_model)
 
   def split_heads(self, x, batch_size):
     x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
@@ -255,8 +261,8 @@ class EncoderLayer(tf.keras.layers.Layer):
     self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
     self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
-    self.dropout1 = tf.keras.layers.Dropout(dropout)
-    self.dropout2 = tf.keras.layers.Dropout(dropout)
+    self.dropout1 = tf.keras.layers.Dropout(rate=dropout)
+    self.dropout2 = tf.keras.layers.Dropout(rate=dropout)
 
   def call(self, x, training, mask):
     # (batch_size, input_seq_len, d_model)
@@ -296,7 +302,7 @@ class Encoder(tf.keras.layers.Layer):
         for _ in range(num_layers)
     ]
 
-    self.dropout = tf.keras.layers.Dropout(dropout)
+    self.dropout = tf.keras.layers.Dropout(rate=dropout)
 
   def call(self, x, training, mask):
     seq_len = tf.shape(x)[1]
@@ -326,9 +332,9 @@ class DecoderLayer(tf.keras.layers.Layer):
     self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
     self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
-    self.dropout1 = tf.keras.layers.Dropout(dropout)
-    self.dropout2 = tf.keras.layers.Dropout(dropout)
-    self.dropout3 = tf.keras.layers.Dropout(dropout)
+    self.dropout1 = tf.keras.layers.Dropout(rate=dropout)
+    self.dropout2 = tf.keras.layers.Dropout(rate=dropout)
+    self.dropout3 = tf.keras.layers.Dropout(rate=dropout)
 
   def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
     attn1, attn_weights_block1 = self.mha1(x, x, x, look_ahead_mask)
@@ -368,7 +374,7 @@ class Decoder(tf.keras.layers.Layer):
         DecoderLayer(d_model, num_heads, units, dropout)
         for _ in range(num_layers)
     ]
-    self.dropout = tf.keras.layers.Dropout(dropout)
+    self.dropout = tf.keras.layers.Dropout(rate=dropout)
 
   def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
     seq_len = tf.shape(x)[1]
@@ -408,7 +414,7 @@ class Transformer(tf.keras.Model):
     self.decoder = Decoder(num_layers, d_model, num_heads, units, vocab_size,
                            dropout)
 
-    self.final_layer = tf.keras.layers.Dense(vocab_size)
+    self.final_layer = tf.keras.layers.Dense(units=vocab_size)
 
   def call(self, inp, tar, training, enc_padding_mask, look_ahead_mask,
            dec_padding_mask):
@@ -426,13 +432,18 @@ class Transformer(tf.keras.Model):
 
 
 NUM_LAYERS = 4
-D_MODEL = 128
-UNITS = 512
+D_MODEL = 256
 NUM_HEADS = 8
-DROPOUT = 0.1
+UNITS = 512
+DROPOUT = 0.3
 
-transformer = Transformer(NUM_LAYERS, D_MODEL, NUM_HEADS, UNITS, VOCAB_SIZE,
-                          DROPOUT)
+transformer = Transformer(
+    num_layers=NUM_LAYERS,
+    d_model=D_MODEL,
+    num_heads=NUM_HEADS,
+    units=UNITS,
+    vocab_size=VOCAB_SIZE,
+    dropout=DROPOUT)
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -478,31 +489,30 @@ train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(
 eval_loss = tf.keras.metrics.Mean(name='eval_loss')
 eval_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='eval_accuracy')
 
-
-def create_masks(inp, tar):
-  # Encoder padding mask
-  enc_padding_mask = create_padding_mask(inp)
-
-  # Used in the 2nd attention block in the decoder.
-  # This padding mask is used to mask the encoder outputs.
-  dec_padding_mask = create_padding_mask(inp)
-
-  # Used in the 1st attention block in the decoder.
-  # It is used to pad and mask future tokens in the input received by
-  # the decoder.
-  look_ahead_mask = create_look_ahead_mask(tf.shape(tar)[1])
-  dec_target_padding_mask = create_padding_mask(tar)
-  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
-
-  return enc_padding_mask, combined_mask, dec_padding_mask
-
-
 CKPT_PATH = "runs/"
 ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
 ckpt_manager = tf.train.CheckpointManager(ckpt, CKPT_PATH, max_to_keep=3)
 if ckpt_manager.latest_checkpoint:
   ckpt.restore(ckpt_manager.latest_checkpoint)
   print('Restored checkpoint {}'.format(ckpt_manager.latest_checkpoint))
+
+
+def create_masks(inputs, outputs):
+  # Encoder padding mask
+  enc_padding_mask = create_padding_mask(inputs)
+
+  # Used in the 2nd attention block in the decoder.
+  # This padding mask is used to mask the encoder outputs.
+  dec_padding_mask = create_padding_mask(inputs)
+
+  # Used in the 1st attention block in the decoder.
+  # It is used to pad and mask future tokens in the input received by
+  # the decoder.
+  look_ahead_mask = create_look_ahead_mask(tf.shape(outputs)[1])
+  dec_target_padding_mask = create_padding_mask(outputs)
+  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+
+  return enc_padding_mask, combined_mask, dec_padding_mask
 
 
 @tf.function
@@ -543,11 +553,11 @@ def eval_step(questions, answers):
   eval_accuracy(real_answers, predictions)
 
 
-EPOCHS = 10
+EPOCHS = 20
 # Number of batches per epoch
 NUM_BATCH = int(np.ceil(len(train_questions) / BATCH_SIZE))
 
-for epoch in range(20):
+for epoch in range(EPOCHS):
   # reset metrics
   train_loss.reset_states()
   train_accuracy.reset_states()
