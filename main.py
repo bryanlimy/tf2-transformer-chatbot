@@ -148,6 +148,24 @@ def create_look_ahead_mask(size):
   return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
 
 
+def create_masks(inputs, outputs):
+  # Encoder padding mask
+  enc_padding_mask = create_padding_mask(inputs)
+
+  # Used in the 2nd attention block in the decoder.
+  # This padding mask is used to mask the encoder outputs.
+  dec_padding_mask = create_padding_mask(inputs)
+
+  # Used in the 1st attention block in the decoder.
+  # It is used to pad and mask future tokens in the input received by
+  # the decoder.
+  look_ahead_mask = create_look_ahead_mask(tf.shape(outputs)[1])
+  dec_target_padding_mask = create_padding_mask(outputs)
+  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+
+  return enc_padding_mask, combined_mask, dec_padding_mask
+
+
 def scaled_dot_product_attention(query, key, value, mask):
   """Calculate the attention weights. """
   matmul_qk = tf.matmul(query, key, transpose_b=True)
@@ -384,21 +402,23 @@ class Transformer(tf.keras.Model):
     self.decoder = Decoder(num_layers, d_model, num_heads, units, vocab_size,
                            dropout)
 
-    self.final_layer = tf.keras.layers.Dense(units=vocab_size)
+    self.dense = tf.keras.layers.Dense(units=vocab_size)
 
-  def call(self, inp, tar, training, enc_padding_mask, look_ahead_mask,
-           dec_padding_mask):
-    # (batch_size, inp_seq_len, d_model)
-    enc_output = self.encoder(inp, training, enc_padding_mask)
+  def call(self,
+           inputs,
+           dec_inputs,
+           enc_padding_mask,
+           look_ahead_mask,
+           dec_padding_mask,
+           training=False):
+    enc_output = self.encoder(inputs, training, enc_padding_mask)
 
-    # dec_output.shape == (batch_size, tar_seq_len, d_model)
     dec_output, attention_weights = self.decoder(
-        tar, enc_output, training, look_ahead_mask, dec_padding_mask)
+        dec_inputs, enc_output, training, look_ahead_mask, dec_padding_mask)
 
-    # (batch_size, tar_seq_len, target_vocab_size)
-    final_output = self.final_layer(dec_output)
+    outputs = self.dense(dec_output)
 
-    return final_output, attention_weights
+    return outputs, attention_weights
 
 
 NUM_LAYERS = 4
@@ -464,24 +484,6 @@ if ckpt_manager.latest_checkpoint:
   print('Restored checkpoint {}'.format(ckpt_manager.latest_checkpoint))
 
 
-def create_masks(inputs, outputs):
-  # Encoder padding mask
-  enc_padding_mask = create_padding_mask(inputs)
-
-  # Used in the 2nd attention block in the decoder.
-  # This padding mask is used to mask the encoder outputs.
-  dec_padding_mask = create_padding_mask(inputs)
-
-  # Used in the 1st attention block in the decoder.
-  # It is used to pad and mask future tokens in the input received by
-  # the decoder.
-  look_ahead_mask = create_look_ahead_mask(tf.shape(outputs)[1])
-  dec_target_padding_mask = create_padding_mask(outputs)
-  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
-
-  return enc_padding_mask, combined_mask, dec_padding_mask
-
-
 @tf.function
 def train_step(inputs, targets):
   # use teacher forcing, decoder use the previous target as input
@@ -490,11 +492,16 @@ def train_step(inputs, targets):
   cropped_targets = targets[:, 1:]
 
   enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
-      questions, decoder_inputs)
+      inputs, decoder_inputs)
 
   with tf.GradientTape() as tape:
-    predictions, _ = transformer(inputs, decoder_inputs, True, enc_padding_mask,
-                                 combined_mask, dec_padding_mask)
+    predictions, _ = transformer(
+        inputs,
+        dec_inputs=decoder_inputs,
+        enc_padding_mask=enc_padding_mask,
+        look_ahead_mask=combined_mask,
+        dec_padding_mask=dec_padding_mask,
+        training=True)
     loss = loss_function(cropped_targets, predictions)
 
   gradients = tape.gradient(loss, transformer.trainable_variables)
@@ -549,8 +556,12 @@ def evaluate(sentence):
 
     # predictions.shape == (batch_size, seq_len, vocab_size)
     predictions, attention_weights = transformer(
-        sentence, output, False, enc_padding_mask, combined_mask,
-        dec_padding_mask)
+        sentence,
+        dec_inputs=output,
+        enc_padding_mask=enc_padding_mask,
+        look_ahead_mask=combined_mask,
+        dec_padding_mask=dec_padding_mask,
+        training=False)
 
     # select the last word from the seq_len dimension
     predictions = predictions[:, -1:, :]
