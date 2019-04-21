@@ -25,6 +25,7 @@ path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
 
 MAX_LENGTH = 40
+NUM_SAMPLES = 10000
 
 
 def preprocess_sentence(sentence):
@@ -48,7 +49,7 @@ def load_conversations():
       parts = line.replace('\n', '').split(' +++$+++ ')
       id2line[parts[0]] = parts[4]
 
-  inputs, targets = [], []
+  inputs, outputs = [], []
 
   with open(path_to_movie_conversations, 'r') as file:
     for line in file:
@@ -56,12 +57,30 @@ def load_conversations():
       # get conversation in a list of line ID
       conversation = [line[1:-1] for line in parts[3][1:-1].split(', ')]
       for i in range(len(conversation) - 1):
-        input = preprocess_sentence(id2line[conversation[i]])
-        target = preprocess_sentence(id2line[conversation[i + 1]])
-        if max([len(input), len(target)]) <= MAX_LENGTH:
-          inputs.append(input)
-          targets.append(target)
-  return inputs, targets
+        inputs.append(preprocess_sentence(id2line[conversation[i]]))
+        outputs.append(preprocess_sentence(id2line[conversation[i + 1]]))
+  return inputs, outputs
+
+
+def tokenize_and_filter(tokenizer, inputs, outputs):
+  tokenized_inputs, tokenized_outputs = [], []
+  start_token, end_token = [tokenizer.vocab_size], [tokenizer.vocab_size + 1]
+  for (input, output) in zip(inputs, outputs):
+    # tokenize sentence
+    input = start_token + tokenizer.encode(input) + end_token
+    output = start_token + tokenizer.encode(output) + end_token
+    # check tokenized sentence max length
+    if len(input) <= MAX_LENGTH and len(output) <= MAX_LENGTH:
+      tokenized_inputs.append(input)
+      tokenized_outputs.append(output)
+    if len(tokenized_inputs) >= NUM_SAMPLES:
+      break
+  # pad tokenized sentences
+  tokenized_inputs = tf.keras.preprocessing.sequence.pad_sequences(
+      tokenized_inputs, maxlen=MAX_LENGTH, padding='post')
+  tokenized_outputs = tf.keras.preprocessing.sequence.pad_sequences(
+      tokenized_outputs, maxlen=MAX_LENGTH, padding='post')
+  return tokenized_inputs, tokenized_outputs
 
 
 if os.path.exists('dataset.pkl'):
@@ -75,6 +94,8 @@ else:
 
   tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
       questions + answers, target_vocab_size=2**13)
+
+  questions, answers = tokenize_and_filter(tokenizer, questions, answers)
 
   with open('dataset.pkl', 'wb') as file:
     pickle.dump([questions, answers, tokenizer], file)
@@ -90,29 +111,11 @@ BUFFER_SIZE = 20000
 BATCH_SIZE = 64
 VOCAB_SIZE = tokenizer.vocab_size + 2
 
-
-def encode(question, answer):
-  question = [tokenizer.vocab_size] + tokenizer.encode(
-      question.numpy()) + [tokenizer.vocab_size + 1]
-  answer = [tokenizer.vocab_size] + tokenizer.encode(
-      answer.numpy()) + [tokenizer.vocab_size + 1]
-  return question, answer
-
-
-def tf_encode(question, answer):
-  return tf.py_function(encode, [question, answer], [tf.int32, tf.int32])
-
-
 train_ds = tf.data.Dataset.from_tensor_slices((train_questions, train_answers))
-train_ds = train_ds.map(tf_encode)
-train_ds = train_ds.cache()
-train_ds = train_ds.shuffle(BUFFER_SIZE).padded_batch(
-    BATCH_SIZE, padded_shapes=([-1], [-1]))
-train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
+train_ds = train_ds.cache().shuffle(BUFFER_SIZE).prefetch(
+    tf.data.experimental.AUTOTUNE)
 
 eval_ds = tf.data.Dataset.from_tensor_slices((eval_questions, eval_answers))
-eval_ds = eval_ds.map(tf_encode)
-eval_ds = eval_ds.padded_batch(BATCH_SIZE, padded_shapes=([-1], [-1]))
 
 
 def get_angles(pos, i, d_model):
@@ -138,15 +141,15 @@ def positional_encoding(position, d_model):
   return tf.cast(pos_encoding, dtype=tf.float32)
 
 
+# Mask all the pad tokens (value `0`) in the batch to ensure the model does not
+# treat padding as input.
 def create_padding_mask(seq):
   seq = tf.cast(tf.math.equal(seq, 0), tf.float32)
-
-  # add extra dimensions so that we can add the padding
-  # to the attention logits.
-  # (batch_size, 1, 1, seq_len)
   return seq[:, tf.newaxis, tf.newaxis, :]
 
 
+# Look-ahead mask to mask the future tokens in a sequence.
+# i.e. To predict the third word, only the first and second word will be used
 def create_look_ahead_mask(size):
   return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
 
@@ -537,8 +540,9 @@ def eval_step(questions, answers):
   eval_accuracy(real_answers, predictions)
 
 
-EPOCHS = 20
-num_batch = None
+EPOCHS = 10
+# Number of batches per epoch
+NUM_BATCH = int(np.ceil(len(train_questions) / BATCH_SIZE))
 
 for epoch in range(20):
   # reset metrics
@@ -550,11 +554,9 @@ for epoch in range(20):
   print('Epoch {}'.format(epoch + 1))
   start = time.time()
 
-  with tqdm(total=num_batch) as pbar:
+  with tqdm(total=NUM_BATCH) as pbar:
     for inputs, targets in train_ds:
       train_step(inputs, targets)
-      if epoch == 0:
-        num_batch = 1 if num_batch is None else num_batch + 1
       pbar.update(1)
 
   end = time.time()
@@ -628,6 +630,12 @@ def predict(question):
 
   return predicted_sentence
 
+
+predict('Where have you been?')
+print('')
+
+predict('How are you?')
+print('')
 
 # test the model with its previous output as input
 sentence = 'I am not crazy, my mother had me tested.'
