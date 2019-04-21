@@ -1,16 +1,14 @@
 import os
 import re
 import time
+import pickle
 import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
-import matplotlib.pyplot as plt
 import tensorflow_datasets as tfds
 from sklearn.model_selection import train_test_split
 
 tf.compat.v1.logging.set_verbosity('ERROR')
-
-import pickle
 
 # Download and extract dataset
 path_to_zip = tf.keras.utils.get_file(
@@ -25,6 +23,8 @@ path_to_dataset = os.path.join(
 path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
+
+MAX_LENGTH = 40
 
 
 def preprocess_sentence(sentence):
@@ -48,35 +48,37 @@ def load_conversations():
       parts = line.replace('\n', '').split(' +++$+++ ')
       id2line[parts[0]] = parts[4]
 
-  inputs, outputs = [], []
+  inputs, targets = [], []
+
   with open(path_to_movie_conversations, 'r') as file:
     for line in file:
       parts = line.replace('\n', '').split(' +++$+++ ')
       # get conversation in a list of line ID
       conversation = [line[1:-1] for line in parts[3][1:-1].split(', ')]
       for i in range(len(conversation) - 1):
-        inputs.append(preprocess_sentence(id2line[conversation[i]]))
-        outputs.append(preprocess_sentence(id2line[conversation[i + 1]]))
-  return inputs, outputs
+        input = preprocess_sentence(id2line[conversation[i]])
+        target = preprocess_sentence(id2line[conversation[i + 1]])
+        if max([len(input), len(target)]) <= MAX_LENGTH:
+          inputs.append(input)
+          targets.append(target)
+  return inputs, targets
 
 
 if os.path.exists('dataset.pkl'):
   with open('dataset.pkl', 'rb') as file:
-    [questions, answers, tokenizer] = data = pickle.load(file)
+    [questions, answers, tokenizer] = pickle.load(file)
 else:
   questions, answers = load_conversations()
 
   print('Sample question: {}'.format(questions[0]))
   print('Sample answer: {}'.format(answers[0]))
 
-  # Build tokenizer using tfds for both questions and answers
   tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
       questions + answers, target_vocab_size=2**13)
 
   with open('dataset.pkl', 'wb') as file:
     pickle.dump([questions, answers, tokenizer], file)
 
-# Split training and evaluation datasets
 train_questions, eval_questions, train_answers, eval_answers = train_test_split(
     questions, answers, test_size=0.2, shuffle=True)
 
@@ -84,13 +86,11 @@ print('Train set size: {}'.format(len(train_questions)))
 print('Evaluation set size: {}'.format(len(eval_questions)))
 print('Vocab size: {}'.format(tokenizer.vocab_size))
 
-MAX_LENGTH = 40
 BUFFER_SIZE = 20000
 BATCH_SIZE = 64
 VOCAB_SIZE = tokenizer.vocab_size + 2
 
 
-# Tokenize all sentences and add <start> and <end> tag to each sentence
 def encode(question, answer):
   question = [tokenizer.vocab_size] + tokenizer.encode(
       question.numpy()) + [tokenizer.vocab_size + 1]
@@ -103,30 +103,16 @@ def tf_encode(question, answer):
   return tf.py_function(encode, [question, answer], [tf.int32, tf.int32])
 
 
-# Filter sentences that are longer than MAX_LENGTH
-def filter_max_length(question, answer):
-  return tf.logical_and(
-      tf.size(question) <= MAX_LENGTH,
-      tf.size(answer) <= MAX_LENGTH)
-
-
 train_ds = tf.data.Dataset.from_tensor_slices((train_questions, train_answers))
-# Tokenize and filter both questions and answers
-train_ds = train_ds.map(tf_encode).filter(filter_max_length)
+train_ds = train_ds.map(tf_encode)
 train_ds = train_ds.cache()
-train_ds = train_ds.shuffle(BUFFER_SIZE)
-# pad both questions and answers to (BATCH_SIZE, MAX_LENGTH)
-train_ds = train_ds.padded_batch(
-    BATCH_SIZE, padded_shapes=([MAX_LENGTH], [MAX_LENGTH]))
+train_ds = train_ds.shuffle(BUFFER_SIZE).padded_batch(
+    BATCH_SIZE, padded_shapes=([-1], [-1]))
 train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
 
 eval_ds = tf.data.Dataset.from_tensor_slices((eval_questions, eval_answers))
-eval_ds = eval_ds.map(tf_encode).filter(filter_max_length)
-eval_ds = eval_ds.padded_batch(
-    BATCH_SIZE, padded_shapes=([MAX_LENGTH], [MAX_LENGTH]))
-
-print('Train dataset: {}'.format(train_ds))
-print('Evaluation dataset: {}'.format(eval_ds))
+eval_ds = eval_ds.map(tf_encode)
+eval_ds = eval_ds.padded_batch(BATCH_SIZE, padded_shapes=([-1], [-1]))
 
 
 def get_angles(pos, i, d_model):
@@ -152,21 +138,17 @@ def positional_encoding(position, d_model):
   return tf.cast(pos_encoding, dtype=tf.float32)
 
 
-# Mask all the pad tokens (value `0`) in the batch to ensure the model does not
-# treat padding as input.
-def create_padding_mask(sequence):
-  sequence = tf.cast(tf.math.equal(sequence, 0), tf.float32)
+def create_padding_mask(seq):
+  seq = tf.cast(tf.math.equal(seq, 0), tf.float32)
+
+  # add extra dimensions so that we can add the padding
+  # to the attention logits.
   # (batch_size, 1, 1, seq_len)
-  return sequence[:, tf.newaxis, tf.newaxis, :]
+  return seq[:, tf.newaxis, tf.newaxis, :]
 
 
-# Look-ahead mask to mask the future tokens in a sequence.
-# i.e. To predict the third word, only the first and second word will be used
 def create_look_ahead_mask(size):
   return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-
-
-print(create_look_ahead_mask(4))
 
 
 def scaled_dot_product_attention(query, key, value, mask):
@@ -185,17 +167,18 @@ def scaled_dot_product_attention(query, key, value, mask):
   Returns:
     output, attention_weights
   """
+  # (..., seq_len_q, seq_len_k)
   matmul_qk = tf.matmul(query, key, transpose_b=True)
 
   # scale matmul_qk
   depth = tf.cast(tf.shape(key)[-1], tf.float32)
   scaled_attention_logits = matmul_qk / tf.math.sqrt(depth)
 
-  # multiple with -1e9 ()close to negative infinity so that these cells are
-  # near zero in the output after softmax
+  # add the mask to the scaled tensor.
   if mask is not None:
     scaled_attention_logits += (mask * -1e9)
 
+  # softmax is normalized on the last axis (seq_len_k)
   attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
 
   output = tf.matmul(attention_weights, value)
@@ -214,62 +197,54 @@ class MultiHeadAttention(tf.keras.layers.Layer):
 
     self.depth = d_model // self.num_heads
 
-    self.query_dense_layer = tf.keras.layers.Dense(d_model)
-    self.key_dense_layer = tf.keras.layers.Dense(d_model)
-    self.value_dense_layer = tf.keras.layers.Dense(d_model)
+    self.wq = tf.keras.layers.Dense(d_model)
+    self.wk = tf.keras.layers.Dense(d_model)
+    self.wv = tf.keras.layers.Dense(d_model)
 
     self.dense = tf.keras.layers.Dense(d_model)
 
   def split_heads(self, x, batch_size):
-    """Split the last dimension into (num_heads, depth).
-    Transpose the result such that the shape is (batch_size, num_heads, seq_len, depth)
-    """
     x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
     return tf.transpose(x, perm=[0, 2, 1, 3])
 
-  def call(self, query, key, value, mask):
-    batch_size = tf.shape(query)[0]
+  def call(self, v, k, q, mask):
+    batch_size = tf.shape(q)[0]
 
-    # linear layers
-    query = self.query_dense_layer(query)
-    key = self.key_dense_layer(key)
-    value = self.value_dense_layer(value)
+    q = self.wq(q)
+    k = self.wk(k)
+    v = self.wv(v)
 
-    # split into heads
-    query = self.split_heads(query, batch_size)
-    key = self.split_heads(key, batch_size)
-    value = self.split_heads(value, batch_size)
+    q = self.split_heads(q, batch_size)
+    k = self.split_heads(k, batch_size)
+    v = self.split_heads(v, batch_size)
 
-    # attention
     scaled_attention, attention_weights = scaled_dot_product_attention(
-        query=query, key=key, value=value, mask=mask)
+        q, k, v, mask)
 
     scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
 
-    # concatenation of heads
     concat_attention = tf.reshape(scaled_attention,
                                   (batch_size, -1, self.d_model))
 
-    # final linear layer
     output = self.dense(concat_attention)
 
     return output, attention_weights
 
 
-def point_wise_feed_forward_network(d_model, dff):
+def point_wise_feed_forward_network(d_model, units):
   return tf.keras.Sequential([
-      tf.keras.layers.Dense(dff, activation='relu'),
-      tf.keras.layers.Dense(d_model)
+      tf.keras.layers.Dense(units=units, activation='relu'),
+      tf.keras.layers.Dense(units=d_model)
   ])
 
 
 class EncoderLayer(tf.keras.layers.Layer):
 
-  def __init__(self, d_model, num_heads, dff, dropout=0.1):
+  def __init__(self, d_model, num_heads, units, dropout=0.1):
     super(EncoderLayer, self).__init__()
 
     self.mha = MultiHeadAttention(d_model, num_heads)
-    self.ffn = point_wise_feed_forward_network(d_model, dff)
+    self.ffn = point_wise_feed_forward_network(d_model, units)
 
     self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
     self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
@@ -293,55 +268,13 @@ class EncoderLayer(tf.keras.layers.Layer):
     return out2
 
 
-class DecoderLayer(tf.keras.layers.Layer):
-
-  def __init__(self, d_model, num_heads, dff, dropout=0.1):
-    super(DecoderLayer, self).__init__()
-
-    self.mha1 = MultiHeadAttention(d_model, num_heads)
-    self.mha2 = MultiHeadAttention(d_model, num_heads)
-
-    self.ffn = point_wise_feed_forward_network(d_model, dff)
-
-    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-    self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-
-    self.dropout1 = tf.keras.layers.Dropout(dropout)
-    self.dropout2 = tf.keras.layers.Dropout(dropout)
-    self.dropout3 = tf.keras.layers.Dropout(dropout)
-
-  def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
-    # enc_output.shape == (batch_size, input_seq_len, d_model)
-
-    # (batch_size, target_seq_len, d_model)
-    attn1, attn_weights_block1 = self.mha1(x, x, x, look_ahead_mask)
-    attn1 = self.dropout1(attn1, training=training)
-    out1 = self.layernorm1(attn1 + x)
-
-    # (batch_size, target_seq_len, d_model)
-    attn2, attn_weights_block2 = self.mha2(enc_output, enc_output, out1,
-                                           padding_mask)
-    attn2 = self.dropout2(attn2, training=training)
-    # (batch_size, target_seq_len, d_model)
-    out2 = self.layernorm2(attn2 + out1)
-
-    # (batch_size, target_seq_len, d_model)
-    ffn_output = self.ffn(out2)
-    ffn_output = self.dropout3(ffn_output, training=training)
-    # (batch_size, target_seq_len, d_model)
-    out3 = self.layernorm3(ffn_output + out2)
-
-    return out3, attn_weights_block1, attn_weights_block2
-
-
 class Encoder(tf.keras.layers.Layer):
 
   def __init__(self,
                num_layers,
                d_model,
                num_heads,
-               dff,
+               units,
                vocab_size,
                dropout=0.1):
     super(Encoder, self).__init__()
@@ -353,7 +286,7 @@ class Encoder(tf.keras.layers.Layer):
     self.pos_encoding = positional_encoding(vocab_size, self.d_model)
 
     self.enc_layers = [
-        EncoderLayer(d_model, num_heads, dff, dropout)
+        EncoderLayer(d_model, num_heads, units, dropout)
         for _ in range(num_layers)
     ]
 
@@ -362,8 +295,6 @@ class Encoder(tf.keras.layers.Layer):
   def call(self, x, training, mask):
     seq_len = tf.shape(x)[1]
 
-    # adding embedding and position encoding.
-    # (batch_size, input_seq_len, d_model)
     x = self.embedding(x)
     x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
     x += self.pos_encoding[:, :seq_len, :]
@@ -372,8 +303,42 @@ class Encoder(tf.keras.layers.Layer):
 
     for i in range(self.num_layers):
       x = self.enc_layers[i](x, training, mask)
-    # (batch_size, input_seq_len, d_model)
     return x
+
+
+class DecoderLayer(tf.keras.layers.Layer):
+
+  def __init__(self, d_model, num_heads, units, dropout=0.1):
+    super(DecoderLayer, self).__init__()
+
+    self.mha1 = MultiHeadAttention(d_model, num_heads)
+    self.mha2 = MultiHeadAttention(d_model, num_heads)
+
+    self.ffn = point_wise_feed_forward_network(d_model, units)
+
+    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+    self.dropout1 = tf.keras.layers.Dropout(dropout)
+    self.dropout2 = tf.keras.layers.Dropout(dropout)
+    self.dropout3 = tf.keras.layers.Dropout(dropout)
+
+  def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
+    attn1, attn_weights_block1 = self.mha1(x, x, x, look_ahead_mask)
+    attn1 = self.dropout1(attn1, training=training)
+    out1 = self.layernorm1(attn1 + x)
+
+    attn2, attn_weights_block2 = self.mha2(enc_output, enc_output, out1,
+                                           padding_mask)
+    attn2 = self.dropout2(attn2, training=training)
+    out2 = self.layernorm2(attn2 + out1)
+
+    ffn_output = self.ffn(out2)
+    ffn_output = self.dropout3(ffn_output, training=training)
+    out3 = self.layernorm3(ffn_output + out2)
+
+    return out3, attn_weights_block1, attn_weights_block2
 
 
 class Decoder(tf.keras.layers.Layer):
@@ -382,7 +347,7 @@ class Decoder(tf.keras.layers.Layer):
                num_layers,
                d_model,
                num_heads,
-               dff,
+               units,
                vocab_size,
                dropout=0.1):
     super(Decoder, self).__init__()
@@ -394,7 +359,7 @@ class Decoder(tf.keras.layers.Layer):
     self.pos_encoding = positional_encoding(vocab_size, self.d_model)
 
     self.dec_layers = [
-        DecoderLayer(d_model, num_heads, dff, dropout)
+        DecoderLayer(d_model, num_heads, units, dropout)
         for _ in range(num_layers)
     ]
     self.dropout = tf.keras.layers.Dropout(dropout)
@@ -403,7 +368,6 @@ class Decoder(tf.keras.layers.Layer):
     seq_len = tf.shape(x)[1]
     attention_weights = {}
 
-    # (batch_size, target_seq_len, d_model)
     x = self.embedding(x)
     x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
     x += self.pos_encoding[:, :seq_len, :]
@@ -427,15 +391,15 @@ class Transformer(tf.keras.Model):
                num_layers,
                d_model,
                num_heads,
-               dff,
+               units,
                vocab_size,
                dropout=0.1):
     super(Transformer, self).__init__()
 
-    self.encoder = Encoder(num_layers, d_model, num_heads, dff, vocab_size,
+    self.encoder = Encoder(num_layers, d_model, num_heads, units, vocab_size,
                            dropout)
 
-    self.decoder = Decoder(num_layers, d_model, num_heads, dff, vocab_size,
+    self.decoder = Decoder(num_layers, d_model, num_heads, units, vocab_size,
                            dropout)
 
     self.final_layer = tf.keras.layers.Dense(vocab_size)
@@ -457,12 +421,11 @@ class Transformer(tf.keras.Model):
 
 NUM_LAYERS = 4
 D_MODEL = 128
-DFF = 512
+UNITS = 512
 NUM_HEADS = 8
 DROPOUT = 0.1
-EPOCHS = 20
 
-transformer = Transformer(NUM_LAYERS, D_MODEL, NUM_HEADS, DFF, VOCAB_SIZE,
+transformer = Transformer(NUM_LAYERS, D_MODEL, NUM_HEADS, UNITS, VOCAB_SIZE,
                           DROPOUT)
 
 
@@ -574,9 +537,10 @@ def eval_step(questions, answers):
   eval_accuracy(real_answers, predictions)
 
 
-NUM_BATCH = int(np.ceil(len(train_questions) / BATCH_SIZE))
+EPOCHS = 20
+num_batch = None
 
-for epoch in range(EPOCHS):
+for epoch in range(20):
   # reset metrics
   train_loss.reset_states()
   train_accuracy.reset_states()
@@ -586,15 +550,17 @@ for epoch in range(EPOCHS):
   print('Epoch {}'.format(epoch + 1))
   start = time.time()
 
-  with tqdm(total=NUM_BATCH) as pbar:
-    for (batch, (inp, tar)) in enumerate(train_ds):
-      train_step(inp, tar)
+  with tqdm(total=num_batch) as pbar:
+    for inputs, targets in train_ds:
+      train_step(inputs, targets)
+      if epoch == 0:
+        num_batch = 1 if num_batch is None else num_batch + 1
       pbar.update(1)
 
   end = time.time()
 
-  for inp, tar in eval_ds:
-    eval_step(inp, tar)
+  for inputs, targets in eval_ds:
+    eval_step(inputs, targets)
 
   print('Train Loss {:.4f} Train Accuracy {:.2f} Eval Loss {:.4f} '
         'Eval Accuracy {:.2f} Time {:.2f}s'.format(
@@ -662,12 +628,6 @@ def predict(question):
 
   return predicted_sentence
 
-
-predict('Where have you been?')
-print('')
-
-predict('How are you?')
-print('')
 
 # test the model with its previous output as input
 sentence = 'I am not crazy, my mother had me tested.'
