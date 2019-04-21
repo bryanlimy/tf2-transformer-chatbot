@@ -10,6 +10,8 @@ from sklearn.model_selection import train_test_split
 
 tf.compat.v1.logging.set_verbosity('ERROR')
 
+import pickle
+
 # Download and extract dataset
 path_to_zip = tf.keras.utils.get_file(
     'cornell_movie_dialogs.zip',
@@ -23,9 +25,6 @@ path_to_dataset = os.path.join(
 path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
-
-MAX_LENGTH = 40
-NUM_SAMPLES = 40000
 
 
 def preprocess_sentence(sentence):
@@ -49,33 +48,35 @@ def load_conversations():
       parts = line.replace('\n', '').split(' +++$+++ ')
       id2line[parts[0]] = parts[4]
 
-  inputs, targets = [], []
-  count = 0
+  inputs, outputs = [], []
   with open(path_to_movie_conversations, 'r') as file:
     for line in file:
       parts = line.replace('\n', '').split(' +++$+++ ')
       # get conversation in a list of line ID
       conversation = [line[1:-1] for line in parts[3][1:-1].split(', ')]
       for i in range(len(conversation) - 1):
-        input = preprocess_sentence(id2line[conversation[i]])
-        target = preprocess_sentence(id2line[conversation[i + 1]])
-        if max([len(input), len(target)]) <= MAX_LENGTH:
-          inputs.append(input)
-          targets.append(target)
-          count += 1
-          if count >= NUM_SAMPLES:
-            return inputs, targets
-  return inputs, targets
+        inputs.append(preprocess_sentence(id2line[conversation[i]]))
+        outputs.append(preprocess_sentence(id2line[conversation[i + 1]]))
+  return inputs, outputs
 
 
-questions, answers = load_conversations()
+if os.path.exists('dataset.pkl'):
+  with open('dataset.pkl', 'rb') as file:
+    [questions, answers, tokenizer] = data = pickle.load(file)
+else:
+  questions, answers = load_conversations()
 
-print('Sample question: {}'.format(questions[0]))
-print('Sample answer: {}'.format(answers[0]))
+  print('Sample question: {}'.format(questions[0]))
+  print('Sample answer: {}'.format(answers[0]))
 
-tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
-    questions + answers, target_vocab_size=2**13)
+  # Build tokenizer using tfds for both questions and answers
+  tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
+      questions + answers, target_vocab_size=2**13)
 
+  with open('dataset.pkl', 'wb') as file:
+    pickle.dump([questions, answers, tokenizer], file)
+
+# Split training and evaluation datasets
 train_questions, eval_questions, train_answers, eval_answers = train_test_split(
     questions, answers, test_size=0.2, shuffle=True)
 
@@ -83,11 +84,13 @@ print('Train set size: {}'.format(len(train_questions)))
 print('Evaluation set size: {}'.format(len(eval_questions)))
 print('Vocab size: {}'.format(tokenizer.vocab_size))
 
+MAX_LENGTH = 40
 BUFFER_SIZE = 20000
 BATCH_SIZE = 64
 VOCAB_SIZE = tokenizer.vocab_size + 2
 
 
+# Tokenize all sentences and add <start> and <end> tag to each sentence
 def encode(question, answer):
   question = [tokenizer.vocab_size] + tokenizer.encode(
       question.numpy()) + [tokenizer.vocab_size + 1]
@@ -100,16 +103,30 @@ def tf_encode(question, answer):
   return tf.py_function(encode, [question, answer], [tf.int32, tf.int32])
 
 
+# Filter sentences that are longer than MAX_LENGTH
+def filter_max_length(question, answer):
+  return tf.logical_and(
+      tf.size(question) <= MAX_LENGTH,
+      tf.size(answer) <= MAX_LENGTH)
+
+
 train_ds = tf.data.Dataset.from_tensor_slices((train_questions, train_answers))
-train_ds = train_ds.map(tf_encode)
+# Tokenize and filter both questions and answers
+train_ds = train_ds.map(tf_encode).filter(filter_max_length)
 train_ds = train_ds.cache()
-train_ds = train_ds.shuffle(BUFFER_SIZE).padded_batch(
-    BATCH_SIZE, padded_shapes=([-1], [-1]))
+train_ds = train_ds.shuffle(BUFFER_SIZE)
+# pad both questions and answers to (BATCH_SIZE, MAX_LENGTH)
+train_ds = train_ds.padded_batch(
+    BATCH_SIZE, padded_shapes=([MAX_LENGTH], [MAX_LENGTH]))
 train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
 
 eval_ds = tf.data.Dataset.from_tensor_slices((eval_questions, eval_answers))
-eval_ds = eval_ds.map(tf_encode)
-eval_ds = eval_ds.padded_batch(BATCH_SIZE, padded_shapes=([-1], [-1]))
+eval_ds = eval_ds.map(tf_encode).filter(filter_max_length)
+eval_ds = eval_ds.padded_batch(
+    BATCH_SIZE, padded_shapes=([MAX_LENGTH], [MAX_LENGTH]))
+
+print('Train dataset: {}'.format(train_ds))
+print('Evaluation dataset: {}'.format(eval_ds))
 
 
 def get_angles(pos, i, d_model):
@@ -135,17 +152,21 @@ def positional_encoding(position, d_model):
   return tf.cast(pos_encoding, dtype=tf.float32)
 
 
-def create_padding_mask(seq):
-  seq = tf.cast(tf.math.equal(seq, 0), tf.float32)
-
-  # add extra dimensions so that we can add the padding
-  # to the attention logits.
+# Mask all the pad tokens (value `0`) in the batch to ensure the model does not
+# treat padding as input.
+def create_padding_mask(sequence):
+  sequence = tf.cast(tf.math.equal(sequence, 0), tf.float32)
   # (batch_size, 1, 1, seq_len)
-  return seq[:, tf.newaxis, tf.newaxis, :]
+  return sequence[:, tf.newaxis, tf.newaxis, :]
 
 
+# Look-ahead mask to mask the future tokens in a sequence.
+# i.e. To predict the third word, only the first and second word will be used
 def create_look_ahead_mask(size):
   return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+
+
+print(create_look_ahead_mask(4))
 
 
 def scaled_dot_product_attention(query, key, value, mask):
@@ -164,22 +185,19 @@ def scaled_dot_product_attention(query, key, value, mask):
   Returns:
     output, attention_weights
   """
-  # (..., seq_len_q, seq_len_k)
   matmul_qk = tf.matmul(query, key, transpose_b=True)
 
   # scale matmul_qk
   depth = tf.cast(tf.shape(key)[-1], tf.float32)
   scaled_attention_logits = matmul_qk / tf.math.sqrt(depth)
 
-  # add the mask to the scaled tensor.
+  # multiple with -1e9 ()close to negative infinity so that these cells are
+  # near zero in the output after softmax
   if mask is not None:
     scaled_attention_logits += (mask * -1e9)
 
-  # softmax is normalized on the last axis (seq_len_k)
-  # (..., seq_len_q, seq_len_k)
   attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
 
-  # (..., seq_len_v, depth)
   output = tf.matmul(attention_weights, value)
 
   return output, attention_weights
@@ -196,9 +214,9 @@ class MultiHeadAttention(tf.keras.layers.Layer):
 
     self.depth = d_model // self.num_heads
 
-    self.wq = tf.keras.layers.Dense(d_model)
-    self.wk = tf.keras.layers.Dense(d_model)
-    self.wv = tf.keras.layers.Dense(d_model)
+    self.query_dense_layer = tf.keras.layers.Dense(d_model)
+    self.key_dense_layer = tf.keras.layers.Dense(d_model)
+    self.value_dense_layer = tf.keras.layers.Dense(d_model)
 
     self.dense = tf.keras.layers.Dense(d_model)
 
@@ -209,33 +227,30 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
     return tf.transpose(x, perm=[0, 2, 1, 3])
 
-  def call(self, v, k, q, mask):
-    batch_size = tf.shape(q)[0]
+  def call(self, query, key, value, mask):
+    batch_size = tf.shape(query)[0]
 
-    q = self.wq(q)  # (batch_size, seq_len, d_model)
-    k = self.wk(k)  # (batch_size, seq_len, d_model)
-    v = self.wv(v)  # (batch_size, seq_len, d_model)
+    # linear layers
+    query = self.query_dense_layer(query)
+    key = self.key_dense_layer(key)
+    value = self.value_dense_layer(value)
 
-    # (batch_size, num_heads, seq_len_q, depth)
-    q = self.split_heads(q, batch_size)
-    # (batch_size, num_heads, seq_len_k, depth)
-    k = self.split_heads(k, batch_size)
-    # (batch_size, num_heads, seq_len_v, depth)
-    v = self.split_heads(v, batch_size)
+    # split into heads
+    query = self.split_heads(query, batch_size)
+    key = self.split_heads(key, batch_size)
+    value = self.split_heads(value, batch_size)
 
-    # scaled_attention.shape == (batch_size, num_heads, seq_len_v, depth)
-    # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
+    # attention
     scaled_attention, attention_weights = scaled_dot_product_attention(
-        q, k, v, mask)
+        query=query, key=key, value=value, mask=mask)
 
-    # (batch_size, seq_len_v, num_heads, depth)
     scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
 
-    # (batch_size, seq_len_v, d_model)
+    # concatenation of heads
     concat_attention = tf.reshape(scaled_attention,
                                   (batch_size, -1, self.d_model))
 
-    # (batch_size, seq_len_v, d_model)
+    # final linear layer
     output = self.dense(concat_attention)
 
     return output, attention_weights
@@ -243,9 +258,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
 
 def point_wise_feed_forward_network(d_model, dff):
   return tf.keras.Sequential([
-      # (batch_size, seq_len, dff)
       tf.keras.layers.Dense(dff, activation='relu'),
-      # (batch_size, seq_len, d_model)
       tf.keras.layers.Dense(d_model)
   ])
 
@@ -446,8 +459,8 @@ NUM_LAYERS = 4
 D_MODEL = 128
 DFF = 512
 NUM_HEADS = 8
-DROPOUT = 0.4
-EPOCHS = 30
+DROPOUT = 0.1
+EPOCHS = 20
 
 transformer = Transformer(NUM_LAYERS, D_MODEL, NUM_HEADS, DFF, VOCAB_SIZE,
                           DROPOUT)
@@ -649,6 +662,12 @@ def predict(question):
 
   return predicted_sentence
 
+
+predict('Where have you been?')
+print('')
+
+predict('How are you?')
+print('')
 
 # test the model with its previous output as input
 sentence = 'I am not crazy, my mother had me tested.'
