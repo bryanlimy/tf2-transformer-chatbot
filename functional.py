@@ -23,7 +23,7 @@ path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
 
-NUM_SAMPLES = 25000
+NUM_SAMPLES = 200
 
 
 def preprocess_sentence(sentence):
@@ -240,41 +240,227 @@ def create_masks(inputs, outputs):
   return enc_padding_mask, combined_mask, dec_padding_mask
 
 
-# Define encoder layer
-def get_encoder_layer(max_length, units, d_model, num_heads, dropout):
-  inputs = tf.keras.Input(shape=(max_length, d_model), name="inputs")
-  mask = tf.keras.Input(shape=(1, 1, max_length), name="mask")
+def encoder_layer(input_seq_len,
+                  units,
+                  d_model,
+                  num_heads,
+                  dropout,
+                  name="encoder_layer"):
+  inputs = tf.keras.Input(
+      shape=(input_seq_len, d_model), name="{}/inputs".format(name))
+  padding_mask = tf.keras.Input(
+      shape=(1, 1, input_seq_len), name="{}/padding_mask".format(name))
+  training = tf.keras.Input(shape=(), name="{}/training".format(name))
 
-  attention, _ = MultiHeadAttention(
-      d_model, num_heads)(inputs=[inputs, inputs, inputs, mask])
-  attention = tf.keras.layers.Dropout(rate=dropout)(attention)
+  attention, _ = MultiHeadAttention(d_model, num_heads)(
+      inputs=inputs, key=inputs, value=inputs, mask=padding_mask)
+  attention = tf.keras.layers.Dropout(rate=dropout)(
+      attention, training=training)
+  attention = tf.keras.layers.LayerNormalization(epsilon=1e-6)(inputs +
+                                                               attention)
 
-  layer_norm_1 = tf.keras.layers.LayerNormalization(
-      epsilon=1e-6)(inputs + attention)
-  outputs = tf.keras.layers.Dense(units=units, activation='relu')(layer_norm_1)
+  outputs = tf.keras.layers.Dense(units=units, activation='relu')(attention)
   outputs = tf.keras.layers.Dense(units=d_model)(outputs)
-  outputs = tf.keras.layers.Dropout(rate=dropout)(outputs)
-  outputs = tf.keras.layers.LayerNormalization(
-      epsilon=1e-6)(layer_norm_1 + outputs)
+  outputs = tf.keras.layers.Dropout(rate=dropout)(outputs, training=training)
+  outputs = tf.keras.layers.LayerNormalization(epsilon=1e-6)(attention +
+                                                             outputs)
 
-  encoder_layer = tf.keras.Model(
-      inputs=[inputs, mask], outputs=outputs, name='encoder_layer')
-
-  return encoder_layer
+  return tf.keras.Model(
+      inputs=[inputs, padding_mask, training], outputs=outputs, name=name)
 
 
+def encoder(input_seq_len,
+            vocab_size,
+            num_layers,
+            units,
+            d_model,
+            num_heads,
+            dropout,
+            name="encoder"):
+  inputs = tf.keras.Input(shape=(input_seq_len,), name="{}/inputs".format(name))
+  padding_mask = tf.keras.Input(
+      shape=(1, 1, input_seq_len), name="{}/padding_mask".format(name))
+  training = tf.keras.Input(
+      shape=(), name="{}/training".format(name), dtype=tf.bool)
+
+  embeddings = tf.keras.layers.Embedding(vocab_size, d_model)(inputs)
+  embeddings *= tf.math.sqrt(tf.cast(d_model, tf.float32))
+  embeddings += positional_encoding(
+      position=vocab_size, d_model=d_model)[:, :input_seq_len, :]
+
+  outputs = tf.keras.layers.Dropout(rate=dropout)(embeddings, training=training)
+
+  for i in range(num_layers):
+    outputs = encoder_layer(
+        input_seq_len=input_seq_len,
+        units=units,
+        d_model=d_model,
+        num_heads=num_heads,
+        dropout=dropout,
+        name="encoder_layer_{}".format(i),
+    )(inputs=[outputs, padding_mask, training])
+
+  return tf.keras.Model(
+      inputs=[inputs, padding_mask, training], outputs=outputs, name=name)
+
+
+def decoder_layer(input_seq_len,
+                  target_seq_len,
+                  units,
+                  d_model,
+                  num_heads,
+                  dropout,
+                  name="decoder_layer"):
+  inputs = tf.keras.Input(
+      shape=(target_seq_len, d_model), name="{}/inputs".format(name))
+  enc_outputs = tf.keras.Input(
+      shape=(input_seq_len, d_model), name="{}/encoder_outputs".format(name))
+  look_ahead_mask = tf.keras.Input(
+      shape=(1, 1, target_seq_len), name="{}/look_ahead_mask".format(name))
+  padding_mask = tf.keras.Input(
+      shape=(1, 1, input_seq_len), name='{}/padding_mask'.format(name))
+  training = tf.keras.Input(shape=(), name="{}/training".format(name))
+
+  attention1, _ = MultiHeadAttention(d_model, num_heads)(
+      inputs=inputs, key=inputs, value=inputs, mask=look_ahead_mask)
+  attention1 = tf.keras.layers.Dropout(rate=dropout)(
+      attention1, training=training)
+  attention1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)(attention1 +
+                                                                inputs)
+
+  attention2, _ = MultiHeadAttention(d_model, num_heads)(
+      inputs=attention1, key=enc_outputs, value=enc_outputs, mask=padding_mask)
+  attention2 = tf.keras.layers.Dropout(rate=dropout)(
+      attention2, training=training)
+  attention2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)(attention2 +
+                                                                attention1)
+
+  outputs = tf.keras.layers.Dense(units=units, activation='relu')(attention2)
+  outputs = tf.keras.layers.Dense(units=d_model)(outputs)
+  outputs = tf.keras.layers.Dropout(rate=dropout)(outputs, training=training)
+  outputs = tf.keras.layers.LayerNormalization(epsilon=1e-6)(outputs +
+                                                             attention2)
+
+  return tf.keras.Model(
+      inputs=[inputs, enc_outputs, look_ahead_mask, padding_mask, training],
+      outputs=outputs,
+      name=name)
+
+
+def decoder(input_seq_len,
+            target_seq_len,
+            vocab_size,
+            num_layers,
+            units,
+            d_model,
+            num_heads,
+            dropout,
+            name="decoder"):
+  inputs = tf.keras.Input(
+      shape=(target_seq_len,), name="{}/inputs".format(name))
+  enc_outputs = tf.keras.Input(
+      shape=(input_seq_len, d_model), name="{}/encoder_outputs".format(name))
+  look_ahead_mask = tf.keras.Input(
+      shape=(1, target_seq_len, target_seq_len),
+      name="{}/look_ahead_mask".format(name))
+  padding_mask = tf.keras.Input(
+      shape=(1, 1, input_seq_len), name="{}/padding_mask".format(name))
+  training = tf.keras.Input(shape=(), name="{}/training".format(name))
+
+  embeddings = tf.keras.layers.Embedding(vocab_size, d_model)(inputs)
+  embeddings *= tf.math.sqrt(tf.cast(d_model, tf.float32))
+  embeddings += positional_encoding(
+      position=vocab_size, d_model=d_model)[:, :target_seq_len, :]
+
+  outputs = tf.keras.layers.Dropout(rate=dropout)(embeddings, training=training)
+
+  for i in range(num_layers):
+    outputs = decoder_layer(
+        input_seq_len=input_seq_len,
+        target_seq_len=target_seq_len,
+        units=units,
+        d_model=d_model,
+        num_heads=num_heads,
+        dropout=dropout,
+        name="decoder_layer_{}".format(i),
+    )(inputs=[outputs, enc_outputs, look_ahead_mask, padding_mask, training])
+
+  return tf.keras.Model(
+      inputs=[inputs, enc_outputs, look_ahead_mask, padding_mask, training],
+      outputs=outputs,
+      name=name)
+
+
+def transformer(input_seq_len,
+                target_seq_len,
+                vocab_size,
+                num_layers,
+                units,
+                d_model,
+                num_heads,
+                dropout,
+                name="transformer"):
+  inputs = tf.keras.Input(shape=(input_seq_len,), name="{}/inputs".format(name))
+  dec_inputs = tf.keras.Input(
+      shape=(target_seq_len,), name="{}/dec_inputs".format(name))
+  enc_padding_mask = tf.keras.Input(
+      shape=(1, 1, input_seq_len), name="{}/encoder_padding_mask".format(name))
+  look_ahead_mask = tf.keras.Input(
+      shape=(1, target_seq_len, target_seq_len),
+      name="{}/look_ahead_mask".format(name))
+  dec_padding_mask = tf.keras.Input(
+      shape=(1, 1, input_seq_len), name="{}/decoder_padding_mask".format(name))
+  training = tf.keras.Input(shape=(), name="{}/training".format(name))
+
+  enc_outputs = encoder(
+      input_seq_len=input_seq_len,
+      vocab_size=vocab_size,
+      num_layers=num_layers,
+      units=units,
+      d_model=d_model,
+      num_heads=num_heads,
+      dropout=dropout,
+  )(inputs=[inputs, enc_padding_mask, training])
+
+  dec_outputs = decoder(
+      input_seq_len=input_seq_len,
+      target_seq_len=target_seq_len,
+      vocab_size=vocab_size,
+      num_layers=num_layers,
+      units=units,
+      d_model=d_model,
+      num_heads=num_heads,
+      dropout=dropout,
+  )(inputs=[
+      dec_inputs, enc_outputs, look_ahead_mask, dec_padding_mask, training
+  ])
+
+  outputs = tf.keras.layers.Dense(units=vocab_size)(dec_outputs)
+
+  return tf.keras.Model(
+      inputs=[
+          inputs, dec_inputs, enc_padding_mask, look_ahead_mask,
+          dec_padding_mask, training
+      ],
+      outputs=outputs,
+      name=name)
+
+
+# Hyper-parameters
 NUM_LAYERS = 4
 D_MODEL = 128
 NUM_HEADS = 8
 UNITS = 512
 DROPOUT = 0.1
 
-transformer = Transformer(
+model = transformer(
+    input_seq_len=MAX_LENGTH,
+    target_seq_len=MAX_LENGTH - 1,
+    vocab_size=VOCAB_SIZE,
     num_layers=NUM_LAYERS,
+    units=UNITS,
     d_model=D_MODEL,
     num_heads=NUM_HEADS,
-    units=UNITS,
-    vocab_size=VOCAB_SIZE,
     dropout=DROPOUT)
 
 
@@ -329,24 +515,25 @@ def train_step(inputs, targets):
       inputs, decoder_inputs)
 
   with tf.GradientTape() as tape:
-    predictions, _ = transformer(
+    predictions = model(inputs=[
         inputs,
-        dec_inputs=decoder_inputs,
-        enc_padding_mask=enc_padding_mask,
-        look_ahead_mask=combined_mask,
-        dec_padding_mask=dec_padding_mask,
-        training=True)
+        decoder_inputs,
+        enc_padding_mask,
+        combined_mask,
+        dec_padding_mask,
+        True,
+    ])
     loss = loss_function(cropped_targets, predictions)
 
-  gradients = tape.gradient(loss, transformer.trainable_variables)
-  optimizer.apply_gradients(zip(gradients, transformer.trainable_variables))
+  gradients = tape.gradient(loss, model.trainable_variables)
+  optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
   train_loss(loss)
   train_accuracy(cropped_targets, predictions)
 
 
 CKPT_PATH = "runs/"
-ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
+ckpt = tf.train.Checkpoint(model=model, optimizer=optimizer)
 ckpt_manager = tf.train.CheckpointManager(ckpt, CKPT_PATH, max_to_keep=3)
 if ckpt_manager.latest_checkpoint:
   ckpt.restore(ckpt_manager.latest_checkpoint)
@@ -395,8 +582,7 @@ def evaluate(sentence):
     enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
         sentence, output)
 
-    # predictions.shape == (batch_size, seq_len, vocab_size)
-    predictions, attention_weights = transformer(
+    predictions = model(
         sentence,
         dec_inputs=output,
         enc_padding_mask=enc_padding_mask,
@@ -410,25 +596,26 @@ def evaluate(sentence):
 
     # return the result if the predicted_id is equal to the end token
     if tf.equal(predicted_id, tokenizer.vocab_size + 1):
-      return tf.squeeze(output, axis=0), attention_weights
+      return tf.squeeze(output, axis=0)
 
     # concatenated the predicted_id to the output which is given to the decoder
     # as its input.
     output = tf.concat([output, predicted_id], axis=-1)
 
-  return tf.squeeze(output, axis=0), attention_weights
+  return tf.squeeze(output, axis=0)
 
 
 def predict(sentence):
-  prediction, attention_weights = evaluate(sentence)
-
-  predicted_sentence = tokenizer.decode(
-      [i for i in prediction if i < tokenizer.vocab_size])
-
-  print('Input: {}'.format(sentence))
-  print('Output: {}'.format(predicted_sentence))
-
-  return predicted_sentence
+  # prediction = evaluate(sentence)
+  #
+  # predicted_sentence = tokenizer.decode(
+  #     [i for i in prediction if i < tokenizer.vocab_size])
+  #
+  # print('Input: {}'.format(sentence))
+  # print('Output: {}'.format(predicted_sentence))
+  #
+  # return predicted_sentence
+  pass
 
 
 predict('Where have you been?')
