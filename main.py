@@ -68,10 +68,16 @@ questions, answers = load_conversations()
 print('Sample question: {}'.format(questions[0]))
 print('Sample answer: {}'.format(answers[0]))
 
+# Build tokenizer using tfds for both questions and answers
 tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
     questions + answers, target_vocab_size=2**13)
 
+# Define start and end token to indicate the start and end of a sentence
 START_TOKEN, END_TOKEN = [tokenizer.vocab_size], [tokenizer.vocab_size + 1]
+# Vocabulary size plus start and end token
+VOCAB_SIZE = tokenizer.vocab_size + 2
+
+# Maximum sentence length
 MAX_LENGTH = 40
 
 
@@ -102,44 +108,12 @@ print('Vocab size: {}'.format(tokenizer.vocab_size))
 
 BATCH_SIZE = 64
 BUFFER_SIZE = 20000
-VOCAB_SIZE = tokenizer.vocab_size + 2
 
 train_ds = tf.data.Dataset.from_tensor_slices((questions, answers))
 train_ds = train_ds.cache()
 train_ds = train_ds.shuffle(BUFFER_SIZE)
 train_ds = train_ds.batch(BATCH_SIZE)
 train_ds = train_ds.prefetch(tf.data.experimental.AUTOTUNE)
-
-
-# Mask all the pad tokens (value `0`) in the batch to ensure the model does not
-# treat padding as input.
-def create_padding_mask(sequence):
-  sequence = tf.cast(tf.math.equal(sequence, 0), tf.float32)
-  return sequence[:, tf.newaxis, tf.newaxis, :]
-
-
-# Look-ahead mask to mask the future tokens in a sequence.
-# i.e. To predict the third word, only the first and second word will be used
-def create_look_ahead_mask(size):
-  return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-
-
-def create_masks(inputs, outputs):
-  # Encoder padding mask
-  enc_padding_mask = create_padding_mask(inputs)
-
-  # Used in the 2nd attention block in the decoder.
-  # This padding mask is used to mask the encoder outputs.
-  dec_padding_mask = create_padding_mask(inputs)
-
-  # Used in the 1st attention block in the decoder.
-  # It is used to pad and mask future tokens in the input received by
-  # the decoder.
-  look_ahead_mask = create_look_ahead_mask(tf.shape(outputs)[1])
-  dec_target_padding_mask = create_padding_mask(outputs)
-  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
-
-  return enc_padding_mask, combined_mask, dec_padding_mask
 
 
 def scaled_dot_product_attention(query, key, value, mask):
@@ -233,6 +207,37 @@ def positional_encoding(position, d_model):
   pos_encoding = pos_encoding[np.newaxis, ...]
 
   return tf.cast(pos_encoding, dtype=tf.float32)
+
+
+# Mask all the pad tokens (value `0`) in the batch to ensure the model does not
+# treat padding as input.
+def create_padding_mask(sequence):
+  sequence = tf.cast(tf.math.equal(sequence, 0), tf.float32)
+  return sequence[:, tf.newaxis, tf.newaxis, :]
+
+
+# Look-ahead mask to mask the future tokens in a sequence.
+# i.e. To predict the third word, only the first and second word will be used
+def create_look_ahead_mask(size):
+  return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+
+
+def create_masks(inputs, outputs):
+  # Encoder padding mask
+  enc_padding_mask = create_padding_mask(inputs)
+
+  # Used in the 2nd attention block in the decoder.
+  # This padding mask is used to mask the encoder outputs.
+  dec_padding_mask = create_padding_mask(inputs)
+
+  # Used in the 1st attention block in the decoder.
+  # It is used to pad and mask future tokens in the input received by
+  # the decoder.
+  look_ahead_mask = create_look_ahead_mask(tf.shape(outputs)[1])
+  dec_target_padding_mask = create_padding_mask(outputs)
+  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+
+  return enc_padding_mask, combined_mask, dec_padding_mask
 
 
 def point_wise_feed_forward_network(d_model, units):
@@ -443,9 +448,9 @@ class Transformer(tf.keras.Model):
 
 
 NUM_LAYERS = 4
-D_MODEL = 512
+D_MODEL = 128
 NUM_HEADS = 8
-UNITS = 1024
+UNITS = 512
 DROPOUT = 0.1
 
 transformer = Transformer(
@@ -496,13 +501,6 @@ def loss_function(real, pred):
 train_loss = tf.keras.metrics.Mean(name='loss')
 train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
 
-CKPT_PATH = "runs/"
-ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
-ckpt_manager = tf.train.CheckpointManager(ckpt, CKPT_PATH, max_to_keep=3)
-if ckpt_manager.latest_checkpoint:
-  ckpt.restore(ckpt_manager.latest_checkpoint)
-  print('Restored checkpoint {}'.format(ckpt_manager.latest_checkpoint))
-
 
 @tf.function
 def train_step(inputs, targets):
@@ -530,6 +528,13 @@ def train_step(inputs, targets):
   train_loss(loss)
   train_accuracy(cropped_targets, predictions)
 
+
+CKPT_PATH = "runs/"
+ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
+ckpt_manager = tf.train.CheckpointManager(ckpt, CKPT_PATH, max_to_keep=3)
+if ckpt_manager.latest_checkpoint:
+  ckpt.restore(ckpt_manager.latest_checkpoint)
+  print('Restored checkpoint {}'.format(ckpt_manager.latest_checkpoint))
 
 EPOCHS = 20
 # Number of batches per epoch
@@ -613,7 +618,7 @@ def predict(sentence):
 predict('Where have you been?')
 print('')
 
-predict('How are you?')
+predict("It's a trap")
 print('')
 
 # test the model with its previous output as input
