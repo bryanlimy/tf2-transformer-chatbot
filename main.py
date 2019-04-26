@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import pickle
 import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
@@ -488,14 +487,13 @@ loss_object = tf.keras.losses.SparseCategoricalCrossentropy(
     from_logits=True, reduction='none')
 
 
-def loss_function(real, pred):
-  mask = tf.math.logical_not(tf.math.equal(real, 0))
-  loss_ = loss_object(real, pred)
+def loss_function(y_real, y_pred):
+  loss = loss_object(y_real, y_pred)
 
-  mask = tf.cast(mask, dtype=loss_.dtype)
-  loss_ *= mask
+  mask = tf.cast(tf.not_equal(y_real, 0), dtype=tf.float32)
+  loss = loss * mask
 
-  return tf.reduce_mean(loss_)
+  return tf.reduce_mean(loss)
 
 
 train_loss = tf.keras.metrics.Mean(name='loss')

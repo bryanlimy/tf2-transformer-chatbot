@@ -269,15 +269,15 @@ def encoder_layer(units, d_model, num_heads, dropout, name="encoder_layer"):
       inputs=[inputs, padding_mask], outputs=outputs, name=name)
 
 
-# sample_encoder_layer = encoder_layer(
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_encoder_layer")
-#
-# tf.keras.utils.plot_model(
-#     sample_encoder_layer, to_file='encoder_layer.png', show_shapes=True)
+sample_encoder_layer = encoder_layer(
+    units=512,
+    d_model=128,
+    num_heads=4,
+    dropout=0.3,
+    name="sample_encoder_layer")
+
+tf.keras.utils.plot_model(
+    sample_encoder_layer, to_file='encoder_layer.png', show_shapes=True)
 
 
 def encoder(vocab_size,
@@ -291,7 +291,7 @@ def encoder(vocab_size,
   padding_mask = tf.keras.Input(
       shape=(1, 1, None), name="{}/padding_mask".format(name))
   pos_encoding = tf.keras.Input(
-      shape=(None, d_model), name="{}/positional_encoding".format(name))
+      shape=(None, d_model), name="{}/pos_encoding".format(name))
 
   embeddings = tf.keras.layers.Embedding(vocab_size, d_model)(inputs)
   embeddings *= tf.math.sqrt(tf.cast(d_model, tf.float32))
@@ -312,17 +312,17 @@ def encoder(vocab_size,
       inputs=[inputs, padding_mask, pos_encoding], outputs=outputs, name=name)
 
 
-# sample_encoder = encoder(
-#     vocab_size=8192,
-#     num_layers=4,
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_encoder")
-#
-# tf.keras.utils.plot_model(
-#     sample_encoder, to_file='encoder.png', show_shapes=True)
+sample_encoder = encoder(
+    vocab_size=8192,
+    num_layers=4,
+    units=512,
+    d_model=128,
+    num_heads=4,
+    dropout=0.3,
+    name="sample_encoder")
+
+tf.keras.utils.plot_model(
+    sample_encoder, to_file='encoder.png', show_shapes=True)
 
 
 def decoder_layer(units, d_model, num_heads, dropout, name="decoder_layer"):
@@ -367,15 +367,15 @@ def decoder_layer(units, d_model, num_heads, dropout, name="decoder_layer"):
       name=name)
 
 
-# sample_decoder_layer = decoder_layer(
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_decoder_layer")
-#
-# tf.keras.utils.plot_model(
-#     sample_decoder_layer, to_file='decoder_layer.png', show_shapes=True)
+sample_decoder_layer = decoder_layer(
+    units=512,
+    d_model=128,
+    num_heads=4,
+    dropout=0.3,
+    name="sample_decoder_layer")
+
+tf.keras.utils.plot_model(
+    sample_decoder_layer, to_file='decoder_layer.png', show_shapes=True)
 
 
 def decoder(vocab_size,
@@ -393,7 +393,7 @@ def decoder(vocab_size,
   padding_mask = tf.keras.Input(
       shape=(1, 1, None), name="{}/padding_mask".format(name))
   pos_encoding = tf.keras.Input(
-      shape=(None, d_model), name="{}/positional_encoding".format(name))
+      shape=(None, d_model), name="{}/pos_encoding".format(name))
 
   embeddings = tf.keras.layers.Embedding(vocab_size, d_model)(inputs)
   embeddings *= tf.math.sqrt(tf.cast(d_model, tf.float32))
@@ -416,17 +416,17 @@ def decoder(vocab_size,
       name=name)
 
 
-# sample_decoder = decoder(
-#     vocab_size=8192,
-#     num_layers=4,
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_decoder")
-#
-# tf.keras.utils.plot_model(
-#     sample_decoder, to_file='decoder.png', show_shapes=True)
+sample_decoder = decoder(
+    vocab_size=8192,
+    num_layers=4,
+    units=512,
+    d_model=128,
+    num_heads=4,
+    dropout=0.3,
+    name="sample_decoder")
+
+tf.keras.utils.plot_model(
+    sample_decoder, to_file='decoder.png', show_shapes=True)
 
 
 def transformer(vocab_size,
@@ -436,18 +436,16 @@ def transformer(vocab_size,
                 num_heads,
                 dropout,
                 name="transformer"):
-  inputs = tf.keras.Input(shape=(None,), name="{}/inputs".format(name))
-  dec_inputs = tf.keras.Input(shape=(None,), name="{}/dec_inputs".format(name))
-  enc_padding_mask = tf.keras.Input(
-      shape=(1, 1, None), name="{}/encoder_padding_mask".format(name))
+  inputs = tf.keras.Input(shape=(None,), name="inputs")
+  dec_inputs = tf.keras.Input(shape=(None,), name="dec_inputs")
+  enc_padding_mask = tf.keras.Input(shape=(1, 1, None), name="enc_padding_mask")
   look_ahead_mask = tf.keras.Input(
-      shape=(1, None, None), name="{}/look_ahead_mask".format(name))
-  dec_padding_mask = tf.keras.Input(
-      shape=(1, 1, None), name="{}/decoder_padding_mask".format(name))
+      shape=(1, None, None), name="look_ahead_mask")
+  dec_padding_mask = tf.keras.Input(shape=(1, 1, None), name="dec_padding_mask")
   enc_pos_encoding = tf.keras.Input(
-      shape=(None, d_model), name="{}/encoder_positional_encoding".format(name))
+      shape=(None, d_model), name="enc_pos_encoding")
   dec_pos_encoding = tf.keras.Input(
-      shape=(None, d_model), name="{}/decoder_positional_encoding".format(name))
+      shape=(None, d_model), name="dec_pos_encoding")
 
   enc_outputs = encoder(
       vocab_size=vocab_size,
@@ -470,7 +468,7 @@ def transformer(vocab_size,
       dec_pos_encoding
   ])
 
-  outputs = tf.keras.layers.Dense(units=vocab_size)(dec_outputs)
+  outputs = tf.keras.layers.Dense(units=vocab_size, name="outputs")(dec_outputs)
 
   return tf.keras.Model(
       inputs=[
@@ -481,17 +479,17 @@ def transformer(vocab_size,
       name=name)
 
 
-# sample_transformer = transformer(
-#     vocab_size=8192,
-#     num_layers=4,
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_transformer")
-#
-# tf.keras.utils.plot_model(
-#     sample_transformer, to_file='transformer.png', show_shapes=True)
+sample_transformer = transformer(
+    vocab_size=8192,
+    num_layers=4,
+    units=512,
+    d_model=128,
+    num_heads=4,
+    dropout=0.3,
+    name="sample_transformer")
+
+tf.keras.utils.plot_model(
+    sample_transformer, to_file='transformer.png', show_shapes=True)
 
 tf.keras.backend.clear_session()
 
@@ -535,109 +533,43 @@ optimizer = tf.keras.optimizers.Adam(
     learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9)
 
 
-def loss_function(real, pred):
+def loss_function(y_true, y_pred):
+  y_true = tf.reshape(y_true, shape=(-1, MAX_LENGTH - 1))
   loss = tf.keras.losses.SparseCategoricalCrossentropy(
-      from_logits=True, reduction='none')(real, pred)
+      from_logits=True, reduction='none')(y_true, y_pred)
 
-  # apply mask to ignore paddings
-  mask = tf.cast(tf.logical_not(tf.math.equal(real, 0)), dtype=loss.dtype)
-  loss *= mask
+  mask = tf.cast(tf.not_equal(y_true, 0), dtype=tf.float32)
+  loss = tf.multiply(loss, mask)
 
   return tf.reduce_mean(loss)
 
 
 model.compile(optimizer=optimizer, loss=loss_function)
 
+# use teacher forcing, decoder use the previous target as input
 decoder_inputs = answers[:, :-1]
+# remove START_TOKEN from targets
 cropped_targets = answers[:, 1:]
-enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
+encoder_padding_mask, combined_mask, decoder_padding_mask = create_masks(
     questions, decoder_inputs)
-pos_encoding = positional_encoding(position=VOCAB_SIZE, d_model=D_MODEL)
-enc_pos_encoding = pos_encoding[:, :tf.shape(questions)[1], :]
-enc_pos_encoding = np.repeat(enc_pos_encoding, repeats=DATASET_SIZE, axis=0)
-dec_pos_encoding = pos_encoding[:, :tf.shape(decoder_inputs)[1], :]
-dec_pos_encoding = np.repeat(dec_pos_encoding, repeats=DATASET_SIZE, axis=0)
+encoding = positional_encoding(position=VOCAB_SIZE, d_model=D_MODEL)
+encoder_positional_encoding = encoding[:, :tf.shape(questions)[1], :]
+decoder_positional_encoding = encoding[:, :tf.shape(decoder_inputs)[1], :]
+
+# Calculate the number of step per epoch to crop off batch that has size
+# smaller than BATCH_SIZE
+steps_per_epoch = len(questions) // BATCH_SIZE
 
 model.fit(
     x=[
-        questions, decoder_inputs, enc_padding_mask, combined_mask,
-        dec_padding_mask, enc_pos_encoding, dec_pos_encoding
+        questions, decoder_inputs, encoder_padding_mask, combined_mask,
+        decoder_padding_mask, encoder_positional_encoding,
+        decoder_positional_encoding
     ],
     y=cropped_targets,
     batch_size=BATCH_SIZE,
     epochs=EPOCHS,
-    validation_split=0.2)
-
-# train_loss = tf.keras.metrics.Mean(name='loss')
-# train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
-
-# @tf.function
-# def train_step(inputs, targets):
-#   # use teacher forcing, decoder use the previous target as input
-#   decoder_inputs = targets[:, :-1]
-#   # remove START_TOKEN from targets
-#   cropped_targets = targets[:, 1:]
-#
-#   enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
-#       inputs, decoder_inputs)
-#
-#   pos_encoding = positional_encoding(position=VOCAB_SIZE, d_model=D_MODEL)
-#   enc_pos_encoding = pos_encoding[:, :tf.shape(inputs)[1], :]
-#   dec_pos_encoding = pos_encoding[:, :tf.shape(decoder_inputs)[1], :]
-#
-#   with tf.GradientTape() as tape:
-#     predictions = model(
-#         inputs=[
-#             inputs, decoder_inputs, enc_padding_mask, combined_mask,
-#             dec_padding_mask, enc_pos_encoding, dec_pos_encoding
-#         ],
-#         training=True)
-#     loss = loss_function(cropped_targets, predictions)
-#
-#   gradients = tape.gradient(loss, model.trainable_variables)
-#   optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-#
-#   train_loss(loss)
-#   train_accuracy(cropped_targets, predictions)
-#
-# CKPT_PATH = "runs/"
-# ckpt = tf.train.Checkpoint(model=model, optimizer=optimizer)
-# ckpt_manager = tf.train.CheckpointManager(ckpt, CKPT_PATH, max_to_keep=3)
-# if ckpt_manager.latest_checkpoint:
-#   ckpt.restore(ckpt_manager.latest_checkpoint)
-#   print('Restored checkpoint {}'.format(ckpt_manager.latest_checkpoint))
-#
-# #EPOCHS = 20
-# # Number of batches per epoch
-# NUM_BATCH = int(np.ceil(len(questions) / BATCH_SIZE))
-#
-# for epoch in range(EPOCHS):
-#   # reset metrics
-#   train_loss.reset_states()
-#   train_accuracy.reset_states()
-#
-#   print('Epoch {}'.format(epoch + 1))
-#
-#   start = time.time()
-#
-#   with tqdm(total=NUM_BATCH) as pbar:
-#     for inputs, targets in train_ds:
-#       train_step(inputs, targets)
-#       pbar.update(1)
-#
-#   end = time.time()
-#
-#   print('Loss {:.4f} Accuracy {:.2f} Time {:.2f}s'.format(
-#       train_loss.result(),
-#       train_accuracy.result() * 100,
-#       end - start,
-#   ))
-#
-#   if epoch % 2 == 0:
-#     ckpt_save_path = ckpt_manager.save()
-#     print('Saved checkpoint {}'.format(ckpt_save_path))
-#
-#   print('')
+    steps_per_epoch=steps_per_epoch)
 
 
 def evaluate(sentence):
@@ -651,11 +583,11 @@ def evaluate(sentence):
   output = tf.keras.preprocessing.sequence.pad_sequences(
       output, maxlen=MAX_LENGTH - 1, padding='post')
 
-  pos_encoding = positional_encoding(position=VOCAB_SIZE, d_model=D_MODEL)
+  encoding = positional_encoding(position=VOCAB_SIZE, d_model=D_MODEL)
 
   for i in range(MAX_LENGTH):
-    enc_pos_encoding = pos_encoding[:, :tf.shape(sentence)[1], :]
-    dec_pos_encoding = pos_encoding[:, :tf.shape(output)[1], :]
+    encoder_pos_encoding = encoding[:, :tf.shape(sentence)[1], :]
+    decoder_pos_encoding = encoding[:, :tf.shape(output)[1], :]
 
     enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
         sentence, output)
@@ -663,7 +595,7 @@ def evaluate(sentence):
     predictions = model(
         inputs=[
             sentence, output, enc_padding_mask, combined_mask, dec_padding_mask,
-            enc_pos_encoding, dec_pos_encoding
+            encoder_pos_encoding, decoder_pos_encoding
         ],
         training=False)
 
