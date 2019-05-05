@@ -1,15 +1,14 @@
 import os
 import re
 import time
-import pickle
 import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
 import tensorflow_datasets as tfds
 
 tf.compat.v1.logging.set_verbosity('ERROR')
 
-# Download and extract dataset
 path_to_zip = tf.keras.utils.get_file(
     'cornell_movie_dialogs.zip',
     origin=
@@ -23,7 +22,8 @@ path_to_movie_lines = os.path.join(path_to_dataset, 'movie_lines.txt')
 path_to_movie_conversations = os.path.join(path_to_dataset,
                                            'movie_conversations.txt')
 
-NUM_SAMPLES = 2000
+# Maximum number of samples to preprocess
+MAX_SAMPLES = 200
 
 
 def preprocess_sentence(sentence):
@@ -58,15 +58,12 @@ def load_conversations():
     for i in range(len(conversation) - 1):
       inputs.append(preprocess_sentence(id2line[conversation[i]]))
       outputs.append(preprocess_sentence(id2line[conversation[i + 1]]))
-      if len(inputs) >= NUM_SAMPLES:
+      if len(inputs) >= MAX_SAMPLES:
         return inputs, outputs
   return inputs, outputs
 
 
 questions, answers = load_conversations()
-
-print('Sample question: {}'.format(questions[0]))
-print('Sample answer: {}'.format(answers[0]))
 
 # Build tokenizer using tfds for both questions and answers
 tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
@@ -74,6 +71,7 @@ tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
 
 # Define start and end token to indicate the start and end of a sentence
 START_TOKEN, END_TOKEN = [tokenizer.vocab_size], [tokenizer.vocab_size + 1]
+
 # Vocabulary size plus start and end token
 VOCAB_SIZE = tokenizer.vocab_size + 2
 
@@ -84,26 +82,46 @@ MAX_LENGTH = 40
 # Tokenize, filter and pad sentences
 def tokenize_and_filter(inputs, outputs):
   tokenized_inputs, tokenized_outputs = [], []
-  for (input, output) in zip(inputs, outputs):
+
+  for (sentence1, sentence2) in zip(inputs, outputs):
     # tokenize sentence
-    tokenized_input = START_TOKEN + tokenizer.encode(input) + END_TOKEN
-    tekenized_output = START_TOKEN + tokenizer.encode(output) + END_TOKEN
+    sentence1 = START_TOKEN + tokenizer.encode(sentence1) + END_TOKEN
+    sentence2 = START_TOKEN + tokenizer.encode(sentence2) + END_TOKEN
     # check tokenized sentence max length
-    if len(tokenized_input) <= MAX_LENGTH and len(
-        tekenized_output) <= MAX_LENGTH:
-      tokenized_inputs.append(tokenized_input)
-      tokenized_outputs.append(tekenized_output)
+    if len(sentence1) <= MAX_LENGTH and len(sentence2) <= MAX_LENGTH:
+      tokenized_inputs.append(sentence1)
+      tokenized_outputs.append(sentence2)
+
   # pad tokenized sentences
   tokenized_inputs = tf.keras.preprocessing.sequence.pad_sequences(
       tokenized_inputs, maxlen=MAX_LENGTH, padding='post')
   tokenized_outputs = tf.keras.preprocessing.sequence.pad_sequences(
       tokenized_outputs, maxlen=MAX_LENGTH, padding='post')
+
   return tokenized_inputs, tokenized_outputs
 
 
 questions, answers = tokenize_and_filter(questions, answers)
 
-DATASET_SIZE = len(questions)
+BATCH_SIZE = 64
+BUFFER_SIZE = 20000
+
+# decoder inputs use the previous target as input
+# remove START_TOKEN from targets
+dataset = tf.data.Dataset.from_tensor_slices((
+    {
+        'inputs': questions,
+        'dec_inputs': answers[:, :-1]
+    },
+    {
+        'outputs': answers[:, 1:]
+    },
+))
+
+dataset = dataset.cache()
+dataset = dataset.shuffle(BUFFER_SIZE)
+dataset = dataset.batch(BATCH_SIZE)
+dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
 
 def scaled_dot_product_attention(query, key, value, mask):
@@ -123,7 +141,7 @@ def scaled_dot_product_attention(query, key, value, mask):
 
   output = tf.matmul(attention_weights, value)
 
-  return output, attention_weights
+  return output
 
 
 class MultiHeadAttention(tf.keras.layers.Layer):
@@ -164,8 +182,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     value = self.split_heads(value, batch_size)
 
     # scaled dot-product attention
-    scaled_attention, attention_weights = scaled_dot_product_attention(
-        query, key, value, mask)
+    scaled_attention = scaled_dot_product_attention(query, key, value, mask)
 
     scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
 
@@ -176,38 +193,20 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     # final linear layer
     outputs = self.dense(concat_attention)
 
-    return outputs, attention_weights
+    return outputs
 
 
-# Mask all the pad tokens (value `0`) in the batch to ensure the model does not
-# treat padding as input.
-def create_padding_mask(sequence):
-  sequence = tf.cast(tf.math.equal(sequence, 0), tf.float32)
-  return sequence[:, tf.newaxis, tf.newaxis, :]
+def create_padding_mask(x):
+  mask = tf.cast(tf.math.equal(x, 0), tf.float32)
+  # (batch_size, 1, 1, sequence length)
+  return mask[:, tf.newaxis, tf.newaxis, :]
 
 
-# Look-ahead mask to mask the future tokens in a sequence.
-# i.e. To predict the third word, only the first and second word will be used
-def create_look_ahead_mask(size):
-  return 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
-
-
-def create_masks(inputs, outputs):
-  # Encoder padding mask
-  enc_padding_mask = create_padding_mask(inputs)
-
-  # Used in the 2nd attention block in the decoder.
-  # This padding mask is used to mask the encoder outputs.
-  dec_padding_mask = create_padding_mask(inputs)
-
-  # Used in the 1st attention block in the decoder.
-  # It is used to pad and mask future tokens in the input received by
-  # the decoder.
-  look_ahead_mask = create_look_ahead_mask(tf.shape(outputs)[1])
-  dec_target_padding_mask = create_padding_mask(outputs)
-  combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
-
-  return enc_padding_mask, combined_mask, dec_padding_mask
+def create_look_ahead_mask(x):
+  seq_len = tf.shape(x)[1]
+  look_ahead_mask = 1 - tf.linalg.band_part(tf.ones((seq_len, seq_len)), -1, 0)
+  padding_mask = create_padding_mask(x)
+  return tf.maximum(look_ahead_mask, padding_mask)
 
 
 class PositionalEncoding(tf.keras.layers.Layer):
@@ -239,12 +238,11 @@ class PositionalEncoding(tf.keras.layers.Layer):
 
 
 def encoder_layer(units, d_model, num_heads, dropout, name="encoder_layer"):
-  inputs = tf.keras.Input(shape=(None, d_model), name="{}/inputs".format(name))
-  padding_mask = tf.keras.Input(
-      shape=(1, 1, None), name="{}/padding_mask".format(name))
+  inputs = tf.keras.Input(shape=(None, d_model), name="inputs")
+  padding_mask = tf.keras.Input(shape=(1, 1, None), name="padding_mask")
 
-  attention, _ = MultiHeadAttention(
-      d_model, num_heads, name="{}/attention".format(name))({
+  attention = MultiHeadAttention(
+      d_model, num_heads, name="attention")({
           'query': inputs,
           'key': inputs,
           'value': inputs,
@@ -264,17 +262,6 @@ def encoder_layer(units, d_model, num_heads, dropout, name="encoder_layer"):
       inputs=[inputs, padding_mask], outputs=outputs, name=name)
 
 
-# sample_encoder_layer = encoder_layer(
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_encoder_layer")
-
-# tf.keras.utils.plot_model(
-#     sample_encoder_layer, to_file='encoder_layer.png', show_shapes=True)
-
-
 def encoder(vocab_size,
             num_layers,
             units,
@@ -282,9 +269,8 @@ def encoder(vocab_size,
             num_heads,
             dropout,
             name="encoder"):
-  inputs = tf.keras.Input(shape=(None,), name="{}/inputs".format(name))
-  padding_mask = tf.keras.Input(
-      shape=(1, 1, None), name="{}/padding_mask".format(name))
+  inputs = tf.keras.Input(shape=(None,), name="inputs")
+  padding_mask = tf.keras.Input(shape=(1, 1, None), name="padding_mask")
 
   embeddings = tf.keras.layers.Embedding(vocab_size, d_model)(inputs)
   embeddings *= tf.math.sqrt(tf.cast(d_model, tf.float32))
@@ -305,31 +291,15 @@ def encoder(vocab_size,
       inputs=[inputs, padding_mask], outputs=outputs, name=name)
 
 
-# sample_encoder = encoder(
-#     vocab_size=8192,
-#     num_layers=4,
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_encoder")
-
-# tf.keras.utils.plot_model(
-#     sample_encoder, to_file='encoder.png', show_shapes=True)
-
-
 def decoder_layer(units, d_model, num_heads, dropout, name="decoder_layer"):
-  inputs = tf.keras.Input(shape=(None, d_model), name="{}/inputs".format(name))
-  enc_outputs = tf.keras.Input(
-      shape=(None, d_model), name="{}/encoder_outputs".format(name))
+  inputs = tf.keras.Input(shape=(None, d_model), name="inputs")
+  enc_outputs = tf.keras.Input(shape=(None, d_model), name="encoder_outputs")
   look_ahead_mask = tf.keras.Input(
-      shape=(1, 1, None), name="{}/look_ahead_mask".format(name))
-  padding_mask = tf.keras.Input(
-      shape=(1, 1, None), name='{}/padding_mask'.format(name))
+      shape=(1, None, None), name="look_ahead_mask")
+  padding_mask = tf.keras.Input(shape=(1, 1, None), name='padding_mask')
 
-  attention1, _ = MultiHeadAttention(
-      d_model, num_heads,
-      name="{}/attention_1".format(name))(inputs={
+  attention1 = MultiHeadAttention(
+      d_model, num_heads, name="attention_1")(inputs={
           'query': inputs,
           'key': inputs,
           'value': inputs,
@@ -338,9 +308,8 @@ def decoder_layer(units, d_model, num_heads, dropout, name="decoder_layer"):
   attention1 = tf.keras.layers.LayerNormalization(
       epsilon=1e-6)(attention1 + inputs)
 
-  attention2, _ = MultiHeadAttention(
-      d_model, num_heads,
-      name="{}/attention_2".format(name))(inputs={
+  attention2 = MultiHeadAttention(
+      d_model, num_heads, name="attention_2")(inputs={
           'query': attention1,
           'key': enc_outputs,
           'value': enc_outputs,
@@ -362,17 +331,6 @@ def decoder_layer(units, d_model, num_heads, dropout, name="decoder_layer"):
       name=name)
 
 
-# sample_decoder_layer = decoder_layer(
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_decoder_layer")
-
-# tf.keras.utils.plot_model(
-#     sample_decoder_layer, to_file='decoder_layer.png', show_shapes=True)
-
-
 def decoder(vocab_size,
             num_layers,
             units,
@@ -380,13 +338,11 @@ def decoder(vocab_size,
             num_heads,
             dropout,
             name="decoder"):
-  inputs = tf.keras.Input(shape=(None,), name="{}/inputs".format(name))
-  enc_outputs = tf.keras.Input(
-      shape=(None, d_model), name="{}/encoder_outputs".format(name))
+  inputs = tf.keras.Input(shape=(None,), name="inputs")
+  enc_outputs = tf.keras.Input(shape=(None, d_model), name="encoder_outputs")
   look_ahead_mask = tf.keras.Input(
-      shape=(1, None, None), name="{}/look_ahead_mask".format(name))
-  padding_mask = tf.keras.Input(
-      shape=(1, 1, None), name="{}/padding_mask".format(name))
+      shape=(1, None, None), name="look_ahead_mask")
+  padding_mask = tf.keras.Input(shape=(1, 1, None), name="padding_mask")
 
   embeddings = tf.keras.layers.Embedding(vocab_size, d_model)(inputs)
   embeddings *= tf.math.sqrt(tf.cast(d_model, tf.float32))
@@ -409,19 +365,6 @@ def decoder(vocab_size,
       name=name)
 
 
-# sample_decoder = decoder(
-#     vocab_size=8192,
-#     num_layers=4,
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_decoder")
-
-# tf.keras.utils.plot_model(
-#     sample_decoder, to_file='decoder.png', show_shapes=True)
-
-
 def transformer(vocab_size,
                 num_layers,
                 units,
@@ -431,10 +374,19 @@ def transformer(vocab_size,
                 name="transformer"):
   inputs = tf.keras.Input(shape=(None,), name="inputs")
   dec_inputs = tf.keras.Input(shape=(None,), name="dec_inputs")
-  enc_padding_mask = tf.keras.Input(shape=(1, 1, None), name="enc_padding_mask")
-  look_ahead_mask = tf.keras.Input(
-      shape=(1, None, None), name="look_ahead_mask")
-  dec_padding_mask = tf.keras.Input(shape=(1, 1, None), name="dec_padding_mask")
+
+  enc_padding_mask = tf.keras.layers.Lambda(
+      create_padding_mask, output_shape=(1, 1, None),
+      name='enc_padding_mask')(inputs)
+  # mask the future tokens for decoder inputs at the 1st attention block
+  look_ahead_mask = tf.keras.layers.Lambda(
+      create_look_ahead_mask,
+      output_shape=(1, None, None),
+      name='look_ahead_mask')(dec_inputs)
+  # mask the encoder outputs for the 2nd attention block
+  dec_padding_mask = tf.keras.layers.Lambda(
+      create_padding_mask, output_shape=(1, 1, None),
+      name='dec_padding_mask')(inputs)
 
   enc_outputs = encoder(
       vocab_size=vocab_size,
@@ -456,38 +408,17 @@ def transformer(vocab_size,
 
   outputs = tf.keras.layers.Dense(units=vocab_size, name="outputs")(dec_outputs)
 
-  return tf.keras.Model(
-      inputs=[
-          inputs, dec_inputs, enc_padding_mask, look_ahead_mask,
-          dec_padding_mask
-      ],
-      outputs=outputs,
-      name=name)
+  return tf.keras.Model(inputs=[inputs, dec_inputs], outputs=outputs, name=name)
 
 
-# sample_transformer = transformer(
-#     vocab_size=8192,
-#     num_layers=4,
-#     units=512,
-#     d_model=128,
-#     num_heads=4,
-#     dropout=0.3,
-#     name="sample_transformer")
-
-# tf.keras.utils.plot_model(
-#     sample_transformer, to_file='transformer.png', show_shapes=True)
+tf.keras.backend.clear_session()
 
 # Hyper-parameters
 NUM_LAYERS = 4
-D_MODEL = 128
+D_MODEL = 256
 NUM_HEADS = 8
-UNITS = 512
+UNITS = 1024
 DROPOUT = 0.1
-EPOCHS = 10
-BATCH_SIZE = 64
-BUFFER_SIZE = 20000
-
-tf.keras.backend.clear_session()
 
 model = transformer(
     vocab_size=VOCAB_SIZE,
@@ -496,6 +427,18 @@ model = transformer(
     d_model=D_MODEL,
     num_heads=NUM_HEADS,
     dropout=DROPOUT)
+
+
+def loss_function(y_true, y_pred):
+  y_true = tf.reshape(y_true, shape=(-1, MAX_LENGTH - 1))
+
+  loss = tf.keras.losses.SparseCategoricalCrossentropy(
+      from_logits=True, reduction='none')(y_true, y_pred)
+
+  mask = tf.cast(tf.not_equal(y_true, 0), tf.float32)
+  loss = tf.multiply(loss, mask)
+
+  return tf.reduce_mean(loss)
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -521,17 +464,6 @@ optimizer = tf.keras.optimizers.Adam(
     learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9)
 
 
-def loss_function(y_true, y_pred):
-  y_true = tf.reshape(y_true, shape=(-1, MAX_LENGTH - 1))
-  loss = tf.keras.losses.SparseCategoricalCrossentropy(
-      from_logits=True, reduction='none')(y_true, y_pred)
-
-  mask = tf.cast(tf.not_equal(y_true, 0), dtype=tf.float32)
-  loss = tf.multiply(loss, mask)
-
-  return tf.reduce_mean(loss)
-
-
 def accuracy(y_true, y_pred):
   # ensure labels have shape (batch_size, MAX_LENGTH - 1)
   y_true = tf.reshape(y_true, shape=(-1, MAX_LENGTH - 1))
@@ -541,49 +473,21 @@ def accuracy(y_true, y_pred):
 
 model.compile(optimizer=optimizer, loss=loss_function, metrics=[accuracy])
 
-# use teacher forcing, decoder use the previous target as input
-decoder_inputs = answers[:, :-1]
-# remove START_TOKEN from targets
-cropped_targets = answers[:, 1:]
-encoder_padding_mask, combined_mask, decoder_padding_mask = create_masks(
-    questions, decoder_inputs)
-
-dataset = tf.data.Dataset.from_tensor_slices((
-    {
-        'inputs': questions,
-        'dec_inputs': decoder_inputs,
-        'enc_padding_mask': encoder_padding_mask,
-        'look_ahead_mask': combined_mask,
-        'dec_padding_mask': decoder_padding_mask,
-    },
-    {
-        'outputs': cropped_targets
-    },
-))
-
-dataset = dataset.cache()
-dataset = dataset.shuffle(BUFFER_SIZE)
-dataset = dataset.batch(BATCH_SIZE)
-dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+EPOCHS = 20
 
 model.fit(dataset, epochs=EPOCHS)
 
 
 def evaluate(sentence):
+  sentence = preprocess_sentence(sentence)
+
   sentence = tf.expand_dims(
       START_TOKEN + tokenizer.encode(sentence) + END_TOKEN, axis=0)
 
   output = tf.expand_dims(START_TOKEN, 0)
 
   for i in range(MAX_LENGTH):
-    enc_padding_mask, combined_mask, dec_padding_mask = create_masks(
-        sentence, output)
-
-    predictions = model(
-        inputs=[
-            sentence, output, enc_padding_mask, combined_mask, dec_padding_mask
-        ],
-        training=False)
+    predictions = model(inputs=[sentence, output], training=False)
 
     # select the last word from the seq_len dimension
     predictions = predictions[:, -1:, :]
@@ -591,7 +495,7 @@ def evaluate(sentence):
 
     # return the result if the predicted_id is equal to the end token
     if tf.equal(predicted_id, END_TOKEN[0]):
-      return tf.squeeze(output, axis=0)
+      break
 
     # concatenated the predicted_id to the output which is given to the decoder
     # as its input.
@@ -612,13 +516,11 @@ def predict(sentence):
   return predicted_sentence
 
 
-predict('Where have you been?')
-print('')
+output = predict('Where have you been?')
 
-predict("It's a trap")
-print('')
+output = predict("It's a trap")
 
-# test the model with its previous output as input
+# feed the model with its previous output
 sentence = 'I am not crazy, my mother had me tested.'
 for _ in range(5):
   sentence = predict(sentence)
