@@ -26,5 +26,14 @@ pip install -r requirements.txt
 ### Run
 - check all availble flags and hyper-parameters `python main.py --help`
 ```
-python main.py --batch_size 256 --epochs 50
+python main.py --batch_size 256 --epochs 50 --max_samples 50000
+```
+
+### Samples
+```
+input:		where have you been?
+output:		i m not talking about that .
+
+input:		it's a trap!
+output:		no , it s not .
 ```
