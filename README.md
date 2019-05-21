@@ -20,7 +20,7 @@ pip install -r requirements.txt
 	- Check [dataset.py](dataset.py) for the above implementation
 
 ### Attention
-[transformer model plot](transformer.png)
+![transformer model plot](transformer.png)
 - check [model.py](model.py) for the implementation of Multi-Headed Attention, Positional Encoding and Transformer.
 
 ### Run
