@@ -17,9 +17,9 @@ pip install -r requirements.txt
 	- Tokenize each sentence and add `start_token` and `end_token` to indicate the start and end of each sentence.
 	- Filter out sentence that has more than `max_length` tokens.
 	- Pad tokenized sentences to `max_length`
-	- Check [dataset.py](dataset.py) for the above implementation
+- Check [dataset.py](dataset.py) implementation.
 
-### Attention
+### Model
 ![transformer model plot](transformer.png)
 - check [model.py](model.py) for the implementation of Multi-Headed Attention, Positional Encoding and Transformer.
 
