@@ -1,2 +1,2 @@
-tf-nightly-2.0-preview
-tfds-nightly
+tensorflow==2.0.0
+tensorflow-datasets==1.2.0

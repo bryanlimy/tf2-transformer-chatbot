@@ -95,7 +95,7 @@ def main(hparams):
 
   def accuracy(y_true, y_pred):
     y_true = tf.reshape(y_true, shape=(-1, hparams.max_length - 1))
-    return tf.metrics.SparseCategoricalAccuracy()(y_true, y_pred)
+    return tf.keras.metrics.sparse_categorical_accuracy(y_true, y_pred)
 
   model.compile(optimizer, loss=loss_function, metrics=[accuracy])
 
