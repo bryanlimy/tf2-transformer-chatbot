@@ -1,6 +1,6 @@
 ## Transformer Chatbot with TensorFlow 2.0
 Build an end-to-end chatbot with [Transformer](https://arxiv.org/abs/1706.03762) in TensorFlow 2.0.
-Checkout the my tutorial on [medium.com/tensorflow](https://medium.com/tensorflow/a-transformer-chatbot-tutorial-with-tensorflow-2-0-88bf59e66fe2).
+Checkout the my tutorial on [blog.tensorflow.org](https://blog.tensorflow.org/2019/05/transformer-chatbot-tutorial-with-tensorflow-2.html).
 
 ### Packages
 - TensorFlow 2.0
