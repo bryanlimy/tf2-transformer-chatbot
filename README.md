@@ -2,6 +2,9 @@
 Build an end-to-end chatbot with [Transformer](https://arxiv.org/abs/1706.03762) in TensorFlow 2.0.
 Checkout the my tutorial on [blog.tensorflow.org](https://blog.tensorflow.org/2019/05/transformer-chatbot-tutorial-with-tensorflow-2.html).
 
+### Updates
+- 18 Jan 2019: Added [notebook](tf2_tpu_transformer_chatbot.ipynb) with  Google Colab TPU support in TensorFlow 2.1.
+
 ### Packages
 - TensorFlow 2.0
 - [TensorFlow Datasets](https://www.tensorflow.org/datasets)
