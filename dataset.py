@@ -103,7 +103,7 @@ def get_dataset(hparams):
   questions, answers = load_conversations(hparams, lines_filename,
                                           conversations_filename)
 
-  tokenizer = tfds.features.text.SubwordTextEncoder.build_from_corpus(
+  tokenizer = tfds.deprecated.text.SubwordTextEncoder.build_from_corpus(
       questions + answers, target_vocab_size=2**13)
 
   hparams.start_token = [tokenizer.vocab_size]
