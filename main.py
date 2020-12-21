@@ -1,10 +1,19 @@
 import argparse
 import tensorflow as tf
+from tensorflow.keras import mixed_precision
 
 tf.random.set_seed(1234)
 
-from model import transformer
-from dataset import get_dataset, preprocess_sentence
+from transformer.model import transformer
+from transformer.dataset import get_dataset, preprocess_sentence
+
+
+def set_compute_precision(hparams):
+  hparams.compute_dtype = tf.float32
+  if hparams.mixed_precision:
+    mixed_precision.set_global_policy('mixed_float16')
+    hparams.compute_dtype = tf.float16
+  print(f'Compute policy: {mixed_precision.global_policy().name}')
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -76,6 +85,8 @@ def evaluate(hparams, model, tokenizer):
 
 
 def main(hparams):
+  set_compute_precision(hparams)
+
   dataset, tokenizer = get_dataset(hparams)
 
   model = transformer(hparams)
@@ -121,6 +132,7 @@ if __name__ == '__main__':
   parser.add_argument('--dropout', default=0.1, type=float)
   parser.add_argument('--activation', default='relu', type=str)
   parser.add_argument('--epochs', default=20, type=int)
+  parser.add_argument('--mixed_precision', action='store_true')
 
   hparams = parser.parse_args()
   main(hparams)
