@@ -13,7 +13,7 @@ def set_compute_precision(hparams):
   if hparams.mixed_precision:
     mixed_precision.set_global_policy('mixed_float16')
     hparams.compute_dtype = tf.float16
-  print(f'Compute policy: {mixed_precision.global_policy().name}')
+  print(f'\nCompute policy: {mixed_precision.global_policy().name}\n')
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
