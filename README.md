@@ -7,11 +7,20 @@ Checkout the my tutorial on [blog.tensorflow.org](https://blog.tensorflow.org/20
 - 18 Jan 2020: Added [notebook](tf2_tpu_transformer_chatbot.ipynb) with  Google Colab TPU support in TensorFlow 2.1.
 
 ### Packages
-- TensorFlow 2.3.1
+- TensorFlow 2.4.0
 - [TensorFlow Datasets](https://www.tensorflow.org/datasets)
-```
-pip install -r requirements.txt
-```
+
+### Setup
+- create new anaconda environment and initialize environment `chatbot`
+    ```
+    conda create -n chatbot python=3.8
+    conda activate chatbot
+    ```
+- run installation script
+    ```
+    sh setup.sh
+    ```
+- Note: the script would install CUDA and cuDNN via conda if installing on a Linux system.
 
 ### Dataset
 - We will use the conversations in movies and TV shows provided by [Cornell Movie-Dialogs Corpus](https://www.cs.cornell.edu/~cristian/Cornell_Movie-Dialogs_Corpus.html), which contains more than 220 thousands conversational exchanges between more than 10k pairs of movie characters, as our dataset.
@@ -22,14 +31,14 @@ pip install -r requirements.txt
 	- Tokenize each sentence and add `start_token` and `end_token` to indicate the start and end of each sentence.
 	- Filter out sentence that has more than `max_length` tokens.
 	- Pad tokenized sentences to `max_length`
-- Check [dataset.py](dataset.py) implementation.
+- Check [dataset.py](transformer/dataset.py) implementation.
 
 ### Model
 ![transformer model plot](transformer.png)
-- check [model.py](model.py) for the implementation of Multi-Headed Attention, Positional Encoding and Transformer.
+- check [model.py](transformer/model.py) for the implementation of Multi-Headed Attention, Positional Encoding and Transformer.
 
 ### Run
-- check all availble flags and hyper-parameters `python main.py --help`
+- check all available flags and hyper-parameters `python main.py --help`
 ```
 python main.py --batch_size 256 --epochs 50 --max_samples 50000
 ```
