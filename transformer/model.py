@@ -1,15 +1,13 @@
 import tensorflow as tf
 from tensorflow.keras import layers
 
-DTYPE = tf.float32
-
 
 def scaled_dot_product_attention(query, key, value, mask):
   """Calculate the attention weights. """
   matmul_qk = tf.matmul(query, key, transpose_b=True)
 
   # scale matmul_qk
-  depth = tf.cast(tf.shape(key)[-1], dtype=DTYPE)
+  depth = tf.cast(tf.shape(key)[-1], dtype=tf.float32)
   logits = matmul_qk / tf.math.sqrt(depth)
 
   # add the mask to zero out padding tokens
@@ -76,14 +74,14 @@ class MultiHeadAttention(layers.Layer):
 
 
 def create_padding_mask(x):
-  mask = tf.cast(tf.math.equal(x, 0), dtype=DTYPE)
+  mask = tf.cast(tf.math.equal(x, 0), dtype=tf.float32)
   return mask[:, tf.newaxis, tf.newaxis, :]
 
 
 def create_look_ahead_mask(x):
   seq_len = tf.shape(x)[1]
   look_ahead_mask = 1 - tf.linalg.band_part(
-      tf.ones((seq_len, seq_len), dtype=DTYPE), -1, 0)
+      tf.ones((seq_len, seq_len), dtype=tf.float32), -1, 0)
   padding_mask = create_padding_mask(x)
   return tf.maximum(look_ahead_mask, padding_mask)
 
@@ -101,9 +99,9 @@ class PositionalEncoding(layers.Layer):
 
   def positional_encoding(self, position, d_model):
     angle_rads = self.get_angles(
-        position=tf.cast(tf.range(position)[:, tf.newaxis], dtype=DTYPE),
-        i=tf.cast(tf.range(d_model)[tf.newaxis, :], dtype=DTYPE),
-        d_model=tf.cast(d_model, dtype=DTYPE))
+        position=tf.cast(tf.range(position)[:, tf.newaxis], dtype=tf.float32),
+        i=tf.cast(tf.range(d_model)[tf.newaxis, :], dtype=tf.float32),
+        d_model=tf.cast(d_model, dtype=tf.float32))
     # apply sin to even index in the array
     sines = tf.math.sin(angle_rads[:, 0::2])
     # apply cos to odd index in the array
@@ -129,7 +127,7 @@ def encoder_layer(hparams, name="encoder_layer"):
           'mask': padding_mask
       })
   attention = layers.Dropout(hparams.dropout)(attention)
-  attention += tf.cast(inputs, dtype=DTYPE)
+  attention += tf.cast(inputs, dtype=tf.float32)
   attention = layers.LayerNormalization(epsilon=1e-6)(attention)
 
   outputs = layers.Dense(
@@ -148,7 +146,7 @@ def encoder(hparams, name="encoder"):
   padding_mask = tf.keras.Input(shape=(1, 1, None), name="padding_mask")
 
   embeddings = layers.Embedding(hparams.vocab_size, hparams.d_model)(inputs)
-  embeddings *= tf.math.sqrt(tf.cast(hparams.d_model, dtype=DTYPE))
+  embeddings *= tf.math.sqrt(tf.cast(hparams.d_model, dtype=tf.float32))
   embeddings = PositionalEncoding(hparams)(embeddings)
 
   outputs = layers.Dropout(hparams.dropout)(embeddings)
@@ -178,7 +176,7 @@ def decoder_layer(hparams, name="decoder_layer"):
           'value': inputs,
           'mask': look_ahead_mask
       })
-  attention1 += tf.cast(inputs, dtype=DTYPE)
+  attention1 += tf.cast(inputs, dtype=tf.float32)
   attention1 = layers.LayerNormalization(epsilon=1e-6)(attention1)
 
   attention2 = MultiHeadAttention(
@@ -214,7 +212,7 @@ def decoder(hparams, name='decoder'):
   padding_mask = tf.keras.Input(shape=(1, 1, None), name='padding_mask')
 
   embeddings = layers.Embedding(hparams.vocab_size, hparams.d_model)(inputs)
-  embeddings *= tf.math.sqrt(tf.cast(hparams.d_model, dtype=DTYPE))
+  embeddings *= tf.math.sqrt(tf.cast(hparams.d_model, dtype=tf.float32))
   embeddings = PositionalEncoding(hparams)(embeddings)
 
   outputs = layers.Dropout(hparams.dropout)(embeddings)
@@ -232,10 +230,6 @@ def decoder(hparams, name='decoder'):
 
 
 def transformer(hparams, name="transformer"):
-  if hparams.mixed_precision:
-    global DTYPE
-    DTYPE = tf.float16
-
   inputs = tf.keras.Input(shape=(None,), name="inputs")
   dec_inputs = tf.keras.Input(shape=(None,), name="dec_inputs")
 
@@ -257,7 +251,6 @@ def transformer(hparams, name="transformer"):
   dec_outputs = decoder(hparams)(
       inputs=[dec_inputs, enc_outputs, look_ahead_mask, dec_padding_mask])
 
-  outputs = layers.Dense(
-      hparams.vocab_size, name="outputs", dtype=tf.float32)(dec_outputs)
+  outputs = layers.Dense(hparams.vocab_size, name="outputs")(dec_outputs)
 
   return tf.keras.Model(inputs=[inputs, dec_inputs], outputs=outputs, name=name)
