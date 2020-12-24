@@ -99,7 +99,14 @@ def main(hparams):
 
   model.fit(dataset, epochs=hparams.epochs)
 
-  evaluate(hparams, model, tokenizer)
+  if hparams.model_weights:
+    model.save_weights(hparams.model_weights)
+    print(f'saved model weights to {hparams.model_weights}')
+    tf.keras.backend.clear_session()
+  model1 = transformer(hparams)
+  model1.load_weights(hparams.model_weights)
+
+  evaluate(hparams, model1, tokenizer)
 
 
 if __name__ == '__main__':
@@ -119,6 +126,7 @@ if __name__ == '__main__':
   parser.add_argument('--dropout', default=0.1, type=float)
   parser.add_argument('--activation', default='relu', type=str)
   parser.add_argument('--epochs', default=20, type=int)
+  parser.add_argument('--model_weights', default='weights.h5', type=str)
 
   hparams = parser.parse_args()
   main(hparams)

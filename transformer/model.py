@@ -39,6 +39,11 @@ class MultiHeadAttention(layers.Layer):
 
     self.dense = layers.Dense(self.d_model)
 
+  def get_config(self):
+    config = super(MultiHeadAttention, self).get_config()
+    config.update({'num_heads': self.num_heads, 'd_model': self.d_model})
+    return config
+
   def split_heads(self, inputs, batch_size):
     inputs = tf.reshape(
         inputs, shape=(batch_size, -1, self.num_heads, self.depth))
@@ -88,10 +93,16 @@ def create_look_ahead_mask(x):
 
 class PositionalEncoding(layers.Layer):
 
-  def __init__(self, hparams):
+  def __init__(self, position, d_model):
     super(PositionalEncoding, self).__init__()
-    self.pos_encoding = self.positional_encoding(hparams.vocab_size,
-                                                 hparams.d_model)
+    self.position = position
+    self.d_model = d_model
+    self.pos_encoding = self.positional_encoding(position, d_model)
+
+  def get_config(self):
+    config = super(PositionalEncoding, self).get_config()
+    config.update({'position': self.position, 'd_model': self.d_model})
+    return config
 
   def get_angles(self, position, i, d_model):
     angles = 1 / tf.pow(10000, (2 * (i // 2)) / d_model)
@@ -147,7 +158,8 @@ def encoder(hparams, name="encoder"):
 
   embeddings = layers.Embedding(hparams.vocab_size, hparams.d_model)(inputs)
   embeddings *= tf.math.sqrt(tf.cast(hparams.d_model, dtype=tf.float32))
-  embeddings = PositionalEncoding(hparams)(embeddings)
+  embeddings = PositionalEncoding(hparams.vocab_size,
+                                  hparams.d_model)(embeddings)
 
   outputs = layers.Dropout(hparams.dropout)(embeddings)
 
@@ -213,7 +225,8 @@ def decoder(hparams, name='decoder'):
 
   embeddings = layers.Embedding(hparams.vocab_size, hparams.d_model)(inputs)
   embeddings *= tf.math.sqrt(tf.cast(hparams.d_model, dtype=tf.float32))
-  embeddings = PositionalEncoding(hparams)(embeddings)
+  embeddings = PositionalEncoding(hparams.vocab_size,
+                                  hparams.d_model)(embeddings)
 
   outputs = layers.Dropout(hparams.dropout)(embeddings)
 
