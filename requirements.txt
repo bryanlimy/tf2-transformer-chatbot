@@ -1,1 +1,2 @@
-tensorflow-datasets==4.1.0
+tensorflow-addons
+tensorflow-datasets
