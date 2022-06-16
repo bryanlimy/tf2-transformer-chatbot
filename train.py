@@ -1,16 +1,14 @@
 import argparse
 import tensorflow as tf
 
-tf.random.set_seed(1234)
-
 from transformer.model import transformer
 from transformer.dataset import get_dataset, preprocess_sentence
 
 
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, hparams, warmup_steps=4000):
+    def __init__(self, d_model: int, warmup_steps: int = 4000):
         super(CustomSchedule, self).__init__()
-        self.d_model = tf.cast(hparams.d_model, dtype=tf.float32)
+        self.d_model = tf.cast(d_model, dtype=tf.float32)
         self.warmup_steps = warmup_steps
 
     def __call__(self, step):
@@ -74,12 +72,14 @@ def evaluate(hparams, model, tokenizer):
 
 
 def main(hparams):
+    tf.keras.utils.set_random_seed(1234)
+
     dataset, tokenizer = get_dataset(hparams)
 
     model = transformer(hparams)
 
     optimizer = tf.keras.optimizers.Adam(
-        CustomSchedule(hparams), beta_1=0.9, beta_2=0.98, epsilon=1e-9
+        CustomSchedule(d_model=hparams.d_model), beta_1=0.9, beta_2=0.98, epsilon=1e-9
     )
 
     cross_entropy = tf.keras.losses.SparseCategoricalCrossentropy(
@@ -101,11 +101,22 @@ def main(hparams):
 
     model.fit(dataset, epochs=hparams.epochs)
 
-    evaluate(hparams, model, tokenizer)
+    print(f"\nsaving model to {hparams.output_dir}...")
+    model.save(hparams.output_dir, include_optimizer=False)
+
+    print(
+        f"\nclear TensorFlow backend session and load model from {hparams.output_dir}..."
+    )
+    tf.keras.backend.clear_session()
+    loaded_model = tf.keras.models.load_model(hparams.output_dir, compile=False)
+    evaluate(hparams, loaded_model, tokenizer)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--output_dir", default="runs", type=str, help="path the SaveModel"
+    )
     parser.add_argument(
         "--max_samples",
         default=25000,
@@ -124,5 +135,4 @@ if __name__ == "__main__":
     parser.add_argument("--activation", default="relu", type=str)
     parser.add_argument("--epochs", default=20, type=int)
 
-    hparams = parser.parse_args()
-    main(hparams)
+    main(parser.parse_args())
