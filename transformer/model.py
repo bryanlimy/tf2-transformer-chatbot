@@ -22,12 +22,11 @@ def scaled_dot_product_attention(query, key, value, mask):
 
 
 class MultiHeadAttentionLayer(tf.keras.layers.Layer):
-    def __init__(self, num_heads: int, d_model: int, name="multi_head_attention"):
-        super(MultiHeadAttentionLayer, self).__init__(name=name)
+    def __init__(self, num_heads, d_model, **kwargs):
+        assert d_model % num_heads == 0
+        super(MultiHeadAttentionLayer, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.d_model = d_model
-
-        assert self.d_model % self.num_heads == 0
 
         self.depth = self.d_model // self.num_heads
 
@@ -105,8 +104,8 @@ def create_look_ahead_mask(x):
 
 
 class PositionalEncoding(tf.keras.layers.Layer):
-    def __init__(self, position: int, d_model: int):
-        super(PositionalEncoding, self).__init__()
+    def __init__(self, position: int, d_model: int, **kwargs):
+        super(PositionalEncoding, self).__init__(**kwargs)
         self.position = position
         self.d_model = d_model
         self.pos_encoding = self.positional_encoding(position, d_model)
